@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# GPL clone — re-created by setup, never committed
+vendor/
+
+# Model weights — hundreds of MB, GitHub rejects >100MB
+weights/
+models/
+*.pt
+*.pt.onnx
+*.ckpt
+
+# Debug renders
+*.debug.png
