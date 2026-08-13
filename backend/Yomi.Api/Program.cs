@@ -180,3 +180,5 @@ app.MapPost("/v1/translate", async (
 });
 
 app.Run();
+
+public partial class Program;
