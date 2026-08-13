@@ -76,15 +76,19 @@
       if (typeof page.regions[0]?.kind !== "string") {
         console.error("[yomi] CONTRACT: kind is not a string", page.regions[0]);
       }
-      if (page.naturalWidth !== img.naturalWidth) {
+      // Only meaningful on the fetch paths. The screenshot strategy crops to
+      // the image's bounding box at devicePixelRatio, so the pixel count
+      // legitimately differs while the framing is identical -- and polygons are
+      // normalised, so the overlay still lands correctly.
+      if (result.strategy !== "screenshot" &&
+          page.naturalWidth !== img.naturalWidth) {
         console.warn(
           `[yomi] size mismatch: backend says ${page.naturalWidth}, ` +
           `DOM says ${img.naturalWidth}. Polygons will be misplaced.`
         );
       }
 
-      // >>> v0.3 RENDERING GOES HERE <<<
-      // renderOverlay(img, page);
+      window.__yomiRender(img, page);
     }
   } finally {
     window.__yomiRunning = false;
