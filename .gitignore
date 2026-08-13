@@ -1,7 +1,16 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 .DS_Store
+
+# .NET build output
+bin/
+obj/
+
+# User secrets live outside the repo (~/.microsoft/usersecrets), but never
+# let a stray local override in.
+appsettings.*.local.json
 
 # GPL clone — re-created by setup, never committed
 vendor/
