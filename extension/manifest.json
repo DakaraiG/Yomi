@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Yomi (dev)",
+  "version": "0.3.0",
+  "description": "Manga translation overlay \u2014 development build.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "declarativeNetRequestWithHostAccess"
+  ],
+  "host_permissions": [
+    "http://localhost:5080/*",
+    "http://127.0.0.1:5080/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Yomi \u2014 translate this page"
+  }
+}
