@@ -125,54 +125,125 @@ def test_artwork_whitespace_is_not_a_gutter():
     import numpy as np
     from PIL import ImageDraw
     from app.ordering import panel_reading_order
-    from app.panels import detect_panels
+    from app.panels import detect_pages
 
     page = Image.new("RGB", (800, 600), (255, 255, 255))
     draw = ImageDraw.Draw(page)
     draw.rectangle((40, 40, 760, 560), fill=(180, 180, 180), outline=(0, 0, 0), width=3)
     draw.rectangle((380, 44, 420, 556), fill=(255, 255, 255))  # the false gutter
 
-    panels, _ = detect_panels(np.array(page), [])
-    assert len(panels) == 1
+    assert len(detect_pages(np.array(page))[0].panels) == 1
 
     boxes = [(100, 100, 200, 200), (600, 100, 700, 200)]
     assert panel_reading_order(np.array(page), boxes) == [1, 0]
 
 
-def test_margin_commentary_reads_last_and_a_title_reads_first():
+def _vertical_text(draw, x0, y0, x1, y1, cell=44, stroke=3):
+    """A column of glyph-ish marks: horizontal strokes with gaps between.
+
+    Not decoration. A solid block would pass for a drawn panel -- it is dark
+    across its width *and* down its height -- whereas real type is only dark
+    across. That asymmetry is what tells furniture from a panel, so the
+    fixture has to have it.
+    """
+    y = y0
+    while y + cell <= y1:
+        for k in (0.2, 0.5, 0.8):
+            top = y + int(cell * k)
+            draw.rectangle((x0, top, x1, top + stroke), fill=(20, 20, 20))
+        y += cell
+
+
+def _centres(panels, pad=40):
+    return [
+        ((p[0] + p[2]) / 2 - pad, (p[1] + p[3]) / 2 - pad,
+         (p[0] + p[2]) / 2 + pad, (p[1] + p[3]) / 2 + pad)
+        for p in panels
+    ]
+
+
+def test_stacked_sidebars_are_furniture_and_read_last():
+    # The case that killed the "taller than half the page" rule: margin
+    # content broken into several stacked sidebars, none of them tall enough
+    # to trip a height threshold. What marks them is that no strip they sit in
+    # contains a drawn panel border.
     import numpy as np
     from PIL import ImageDraw
     from app.ordering import panel_reading_order
 
     page, panels = _panel_page(width=900)
     draw = ImageDraw.Draw(page)
-    # Full-height commentary down the right margin, outside the panel block.
-    draw.rectangle((800, 40, 860, 940), fill=(255, 255, 255))
+    sidebars = [(810, 60, 870, 290), (810, 350, 870, 580), (810, 640, 870, 870)]
+    for bar in sidebars:  # ~23% of page height each, like the real spread
+        _vertical_text(draw, *bar)
 
-    commentary = (800.0, 40.0, 860.0, 940.0)   # taller than half the page
-    title = (300.0, 5.0, 500.0, 30.0)          # above the panels
-    in_panel = [
-        ((p[0] + p[2]) / 2 - 40, (p[1] + p[3]) / 2 - 40,
-         (p[0] + p[2]) / 2 + 40, (p[1] + p[3]) / 2 + 40)
-        for p in panels
-    ]
-    boxes = [commentary, *in_panel, title]
+    title = (300.0, 5.0, 500.0, 30.0)
+    boxes = [*sidebars, *_centres(panels), title]
 
     order = panel_reading_order(np.array(page), boxes)
-    assert order[0] == 5           # title first
-    assert order[-1] == 0          # commentary last
-    assert order[1:-1] == [2, 1, 4, 3]
+    assert order[0] == 7                 # title first
+    assert order[1:5] == [4, 3, 6, 5]    # panels, TR TL BR BL
+    assert order[5:] == [0, 1, 2]        # sidebars last, top to bottom
+
+
+def test_spread_orders_the_right_page_first():
+    import numpy as np
+    from app.ordering import panel_reading_order
+    from app.panels import detect_pages, spread_split
+
+    left, lp = _panel_page(width=800)
+    right, rp = _panel_page(width=800)
+    spread = Image.new("RGB", (1700, 1000), (255, 255, 255))
+    spread.paste(left, (0, 0))
+    spread.paste(right, (900, 0))
+
+    arr = np.array(spread)
+    assert spread_split(arr) is not None
+    pages = detect_pages(arr)
+    assert [len(p.panels) for p in pages] == [4, 4]
+    assert pages[0].x0 > pages[1].x0  # right page first
+
+    boxes = _centres(lp) + _centres([(p[0] + 900, p[1], p[2] + 900, p[3]) for p in rp])
+    # 0-3 left page, 4-7 right page; each in TL TR BL BR order.
+    assert panel_reading_order(arr, boxes) == [5, 4, 7, 6, 1, 0, 3, 2]
+
+
+def test_single_page_grid_is_not_split_as_a_spread():
+    # A portrait page whose panels line up produces a full-height white
+    # column too. Splitting on it would give column-major order.
+    import numpy as np
+    from app.panels import detect_pages, spread_split
+
+    page, _ = _panel_page(width=800, height=1000)
+    arr = np.array(page)
+    assert spread_split(arr) is None
+    pages = detect_pages(arr)
+    assert len(pages) == 1
+    assert len(pages[0].panels) == 4
+
+
+def test_landscape_without_a_central_gutter_is_one_page():
+    import numpy as np
+    from PIL import ImageDraw
+    from app.panels import spread_split
+
+    # Wide, but the panels straddle the middle -- no full-height white column.
+    page = Image.new("RGB", (1600, 900), (255, 255, 255))
+    draw = ImageDraw.Draw(page)
+    draw.rectangle((40, 40, 1560, 430), fill=(180, 180, 180), outline=(0, 0, 0), width=3)
+    draw.rectangle((40, 460, 1560, 860), fill=(180, 180, 180), outline=(0, 0, 0), width=3)
+    assert spread_split(np.array(page)) is None
 
 
 def test_blank_page_falls_back_to_geometry():
     import numpy as np
     from app.ordering import panel_reading_order
-    from app.panels import detect_panels
+    from app.panels import detect_pages
 
     blank = np.full((600, 800, 3), 255, dtype=np.uint8)
     boxes = [(10, 10, 100, 100), (400, 10, 490, 100)]
 
-    assert detect_panels(blank, boxes) == ([], None)
+    assert detect_pages(blank)[0].block is None
     assert panel_reading_order(blank, boxes) == [1, 0]
 
 

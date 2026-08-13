@@ -24,7 +24,7 @@ from typing import Sequence
 
 import numpy as np
 
-from app.panels import detect_panels
+from app.panels import Page, detect_pages
 
 Box = tuple[float, float, float, float]  # x0, y0, x1, y1
 
@@ -100,6 +100,44 @@ def _assign(panels: Sequence[Box], cx: float, cy: float) -> int:
     )
 
 
+def _order_page(
+    boxes: Sequence[Box], idxs: list[int], page: Page, band_threshold: float
+) -> list[int]:
+    """Order one page's regions, panel-major.
+
+    Furniture -- anything outside the panel block -- is placed by where it
+    falls: above the block (a page title) reads first, beside or below it
+    (margin commentary, character sidebars) reads last.
+    """
+    if not idxs:
+        return []
+    if page.block is None:
+        return _sorted_subset(boxes, idxs, band_threshold)
+
+    bx0, by0, bx1, by1 = page.block
+    leading: list[int] = []
+    trailing: list[int] = []
+    buckets: list[list[int]] = [[] for _ in page.panels]
+
+    for i in idxs:
+        x0, y0, x1, y1 = boxes[i]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if cx < bx0 or cx > bx1:
+            trailing.append(i)   # beside the panels
+        elif cy < by0:
+            leading.append(i)    # above them
+        elif cy > by1:
+            trailing.append(i)
+        else:
+            buckets[_assign(page.panels, cx, cy)].append(i)
+
+    ordered = _sorted_subset(boxes, leading, band_threshold)
+    for bucket in buckets:  # panels are already in reading order
+        ordered.extend(_sorted_subset(boxes, bucket, band_threshold))
+    ordered.extend(_sorted_subset(boxes, trailing, band_threshold))
+    return ordered
+
+
 def panel_reading_order(
     image: np.ndarray,
     boxes: Sequence[Box],
@@ -107,35 +145,24 @@ def panel_reading_order(
 ) -> list[int]:
     """Return indices of `boxes` in panel-major reading order.
 
-    Regions outside the panel block are placed by where they sit: above it
-    (a page title) reads first, beside or below it (margin commentary) reads
-    last. Both groups sort right-to-left.
+    On a double-page spread the right page is ordered out entirely before the
+    left page begins.
     """
     if not boxes:
         return []
 
-    panels, block = detect_panels(image, boxes)
-    if not panels or block is None:
-        return reading_order(boxes, band_threshold)
-
-    bx0, by0, bx1, by1 = block
-    leading: list[int] = []
-    trailing: list[int] = []
-    buckets: list[list[int]] = [[] for _ in panels]
-
+    pages = detect_pages(image)
+    buckets: list[list[int]] = [[] for _ in pages]
     for i, (x0, y0, x1, y1) in enumerate(boxes):
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        if cx < bx0 or cx > bx1:
-            trailing.append(i)   # beside the panels: margin commentary
-        elif cy < by0:
-            leading.append(i)    # above them: page title
-        elif cy > by1:
-            trailing.append(i)
-        else:
-            buckets[_assign(panels, cx, cy)].append(i)
+        cx = (x0 + x1) / 2
+        # Pages tile the image, so the containment test only misses on a
+        # centroid sitting exactly on the far edge.
+        page = next(
+            (k for k, p in enumerate(pages) if p.x0 <= cx < p.x1), len(pages) - 1
+        )
+        buckets[page].append(i)
 
-    ordered = _sorted_subset(boxes, leading, band_threshold)
-    for bucket in buckets:  # panels are already in reading order
-        ordered.extend(_sorted_subset(boxes, bucket, band_threshold))
-    ordered.extend(_sorted_subset(boxes, trailing, band_threshold))
+    ordered: list[int] = []
+    for page, idxs in zip(pages, buckets):
+        ordered.extend(_order_page(boxes, idxs, page, band_threshold))
     return ordered
