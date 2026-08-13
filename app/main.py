@@ -26,7 +26,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.detector import build_detector
 from app.ocr import build_ocr, crop_region
-from app.ordering import reading_order
+from app.ordering import panel_reading_order
 from app.schemas import DetectedRegion, DetectRequest, DetectResponse, HealthResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -88,7 +88,7 @@ def _analyse(image: np.ndarray) -> DetectResponse:
     raw_regions = detector.detect(image[:, :, ::-1].copy())
     t_detect = time.perf_counter() - t0
 
-    order = reading_order([r.box for r in raw_regions])
+    order = panel_reading_order(image, [r.box for r in raw_regions])
 
     t0 = time.perf_counter()
     regions: list[DetectedRegion] = []
