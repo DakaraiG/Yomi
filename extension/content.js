@@ -20,8 +20,12 @@
   try {
     const images = findPageImages();
     console.log(`[yomi] found ${images.length} candidate page image(s)`);
+    window.__yomiToast?.(
+      images.length === 1 ? "Translating page…"
+                          : `Translating ${images.length} pages…`);
 
     if (images.length === 0) {
+      window.__yomiToast?.("No manga page found here", "error");
       console.warn(
         "[yomi] no candidates. Either the reader uses <canvas> or CSS " +
         "backgrounds rather than <img>, or the size filter is wrong."
@@ -29,6 +33,7 @@
       return;
     }
 
+    let done = 0;
     for (const img of images) {
       console.log(
         `[yomi] requesting ${img.naturalWidth}x${img.naturalHeight} ${img.src}`
@@ -48,7 +53,15 @@
       });
 
       if (!result?.ok) {
-        console.error("[yomi] failed:", result?.error ?? "no response");
+        const raw = result?.error ?? "no response";
+        // Turn backend status codes into something a user can act on.
+        const friendly =
+          /503/.test(raw) ? "Detection sidecar isn't running"
+          : /502/.test(raw) ? "Translation failed — check your API key"
+          : /all retrieval/.test(raw) ? "Couldn't read this image"
+          : raw.slice(0, 90);
+        window.__yomiToast?.(friendly, "error");
+        console.error("[yomi] failed:", raw);
         continue;
       }
 
@@ -89,6 +102,10 @@
       }
 
       window.__yomiRender(img, page);
+      done++;
+      window.__yomiToast?.(
+        `${done}/${images.length} translated · ${page.regions.length} regions`,
+        done === images.length ? "done" : "busy");
     }
   } finally {
     window.__yomiRunning = false;

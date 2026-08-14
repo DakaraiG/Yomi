@@ -117,6 +117,60 @@ async function getImageBytes(ctx) {
   throw new Error(`all retrieval strategies failed — ${tried.join(" | ")}`);
 }
 
+// --- background sampling ---------------------------------------------------
+//
+// Whether it is safe to paint a white fill has nothing to do with the region's
+// KIND. Narration inside a white box is fine; narration set over artwork is the
+// same kind and covering it destroys the panel.
+//
+// The text itself cannot tell us which. The pixels can -- and we already hold
+// the image bytes here, in extension origin, so nothing is tainted.
+//
+// Measure: what fraction of the region is near-white? A speech bubble is mostly
+// white with dark glyphs on it. Art, screentone, or a dark panel is not.
+const ON_WHITE_THRESHOLD = 0.55;
+
+async function annotateBackgrounds(buffer, page) {
+  let bmp;
+  try {
+    bmp = await createImageBitmap(new Blob([buffer]));
+  } catch {
+    // If decoding fails, assume white -- the previous behaviour.
+    page.regions.forEach((r) => (r.onWhite = true));
+    return page;
+  }
+
+  const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0);
+
+  for (const r of page.regions) {
+    const xs = r.polygon.map((p) => p[0]);
+    const ys = r.polygon.map((p) => p[1]);
+    const x0 = Math.max(0, Math.floor(Math.min(...xs) * bmp.width));
+    const x1 = Math.min(bmp.width, Math.ceil(Math.max(...xs) * bmp.width));
+    const y0 = Math.max(0, Math.floor(Math.min(...ys) * bmp.height));
+    const y1 = Math.min(bmp.height, Math.ceil(Math.max(...ys) * bmp.height));
+    const w = x1 - x0, h = y1 - y0;
+
+    if (w < 2 || h < 2) { r.onWhite = true; continue; }
+
+    const data = ctx.getImageData(x0, y0, w, h).data;
+    let near = 0, n = 0;
+    // Every 4th pixel is plenty and keeps this off the critical path.
+    for (let i = 0; i < data.length; i += 16) {
+      const lum = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+      if (lum > 0.85) near++;
+      n++;
+    }
+    r.whiteFraction = n ? near / n : 1;
+    r.onWhite = r.whiteFraction > ON_WHITE_THRESHOLD;
+  }
+
+  bmp.close?.();
+  return page;
+}
+
 // --- helpers ---------------------------------------------------------------
 
 function bytesToBase64(buffer) {
@@ -159,8 +213,10 @@ async function translate(ctx) {
     throw new Error(`Backend ${apiResponse.status}: ${body.slice(0, 200)}`);
   }
 
+  const page = await annotateBackgrounds(buffer, await apiResponse.json());
+
   return {
-    page: await apiResponse.json(),
+    page,
     strategy,
     tried,
     timing: {
