@@ -1,4 +1,4 @@
-# Yomi backend — v0.2
+# Yomi backend — v0.3.1
 
 ASP.NET Core minimal API. Orchestration, caching, and the LLM call.
 
@@ -7,27 +7,32 @@ and what it says, sends both to a vision model for translation, merges the two,
 and returns a `TranslatedPage`. Geometry and reading order come from the
 sidecar; only the language fields come from the model.
 
+Nothing here changed between v0.2 and v0.3.1 — v0.3 was the
+[extension](../extension/README.md), built against this API exactly as it was
+frozen. That is the contract working as intended.
+
 ## Licence note
 
-This project is **AGPL-3.0** — deliberately, and deliberately different from the
-sidecar's GPL-3.0.
+This project is **MIT**, and deliberately not the sidecar's GPL-3.0.
 
 The two are separate processes talking over HTTP, and that seam is the licence
 boundary. The sidecar is GPL because it links `comic-text-detector`; nothing
-GPL is linked here. AGPL was chosen rather than inherited, and it is the
-stronger of the two in one specific way: **GPL obligations trigger on
-distribution, AGPL triggers on network use.** Running this backend as a hosted
-service for other people carries source obligations that merely shipping it
-would not. That is fine for the intended single-user, localhost deployment, and
-is a decision to revisit before anything is ever hosted.
+GPL is linked here, so nothing forces copyleft on this side.
 
 Do not add a project reference between `backend/` and `sidecar/`, and do not
-merge the processes. The separation is load-bearing, not incidental. The browser
-extension must contain no GPL or AGPL code at all.
+merge the processes. The separation is load-bearing, not incidental — a project
+reference would pull this side under the GPL. The browser extension (also MIT)
+must contain no GPL code either.
+
+Historical note: this backend was AGPL-3.0 through v0.2, chosen for its
+network-use trigger on the theory that it might one day be hosted. It is MIT as
+of v0.3.1. The old reasoning is in git history if a hosted deployment ever
+revives the question.
 
 ## Setup
 
-Needs the .NET 10 SDK (`dotnet --version` should print `10.x`).
+Needs the .NET 10 SDK (`dotnet --version` should print `10.x`; `global.json` at
+the repo root pins the band).
 
 ### API key
 
@@ -60,7 +65,8 @@ dotnet run --launch-profile http
 
 Serves on **http://localhost:5080**. Do not move this to 5000 — macOS binds
 that port for AirPlay Receiver, and the failure looks like a routing bug rather
-than a port conflict.
+than a port conflict. The extension hardcodes 5080 in `background.js`, so
+changing it means changing that too.
 
 The port lives in `Yomi.Api/Properties/launchSettings.json`. It must stay under
 `Properties/`; .NET does not read it from the project root, and a
@@ -120,15 +126,21 @@ silently reverts to integers and breaks the contract.
 region the model drops still renders, with the Japanese showing — a visible
 failure, per v0.6.
 
+A page with **no** detected text is a 200 with `regions: []`, not an error, and
+it is cached like any other result. The overlay needs to be able to say "nothing
+here" rather than hang.
+
 ### Status codes
 
 | Code | When |
 |---|---|
 | `400` | Bad base64, or `targetLang` other than `en` |
+| `500` | No API key configured (`api_key_missing`) |
 | `502` | Provider call failed or returned unparseable output |
 | `503` | Sidecar unreachable — usually means it isn't running |
 
-Failures return an RFC 7807-ish body, never a bare 500.
+Failures return an RFC 7807-ish body, never a bare 500. The extension maps 502
+and 503 to plain-English toasts, so keep the codes meaningful.
 
 ## Trying it
 
@@ -151,6 +163,44 @@ curl -s -X POST http://localhost:5080/v1/translate \
   -d @/tmp/req.json \
   -w '\nhttp=%{http_code} wall=%{time_total}s\n' | python3 -m json.tool
 ```
+
+## Tests
+
+From `Yomi.Api.Tests/` — **not** from `backend/`, which has no solution file and
+fails with "Specify a project or solution file":
+
+```bash
+cd Yomi.Api.Tests
+dotnet test          # 14 passed
+```
+
+`YomiAppFactory` boots the real application in memory via
+`WebApplicationFactory<Program>` and replaces exactly two things: `ISidecarClient`
+and `ITranslationClient`, the only two components that would otherwise do network
+I/O. Routing, JSON serialisation, the merge, the cache and the error mapping are
+all the real ones. Swap the edges, keep everything in between honest.
+
+Both replacements are **fakes, not mocks** — working implementations with
+simplified behaviour, which record call counts so the cache tests can tell
+whether the pipeline ran or the answer came from memory.
+
+What is covered:
+
+| Area | Tests |
+|---|---|
+| Merge | Sidecar geometry + model text combine correctly; a region the model drops still comes back with its Japanese |
+| Wire format | `kind` serialises as a string; polygons stay normalised 0–1; `order` is contiguous |
+| Cache | Identical repeat request skips the pipeline; a different `seriesId` misses |
+| Errors | 400 on bad base64 and on `targetLang` ∈ {`fr`, `ja`, `""`}; 503 sidecar down; 502 translation failure |
+
+The cache lives inside the running app and is not reset between tests — the
+factory is shared by `IClassFixture` so the app boots once. That is why every
+test uses its own `seriesId`. Reusing one silently turns the next test into a
+cache hit and the fake sidecar never gets called.
+
+`Program.cs` ends with `public partial class Program;` purely so
+`WebApplicationFactory<Program>` can name the entry point of a top-level-statements
+app. Deleting it breaks the test project's compile, not the API's.
 
 ## Cost
 
@@ -178,8 +228,13 @@ Two consequences. The design doc's estimate of 1–1.5k input tokens per page
 matches the text-only figure almost exactly and appears never to have counted
 the image; true cost is 2.4–3.6× that. And the lever for reducing cost is
 **downscaling images before upload**, not trimming the prompt — untested,
-and it needs checking against detection quality first.
+and it needs checking against detection quality first. The extension's
+screenshot retrieval tier already uploads at viewport resolution rather than
+native, which is a downscale by accident; it has not been measured against
+detection quality either.
 
 Responses carry `input_tokens_details.cache_write_tokens`, so provider-side
-prompt caching is already engaging. The v0.4 plan to put the glossary in the
-stable prefix should pay off as designed.
+prompt caching is already engaging. `TranslationPrompt` puts everything stable
+(system prompt, schema) ahead of everything per-page (series id, region text)
+precisely so a cache breakpoint can sit between them. The v0.4 plan to put the
+glossary in the stable prefix should pay off as designed.

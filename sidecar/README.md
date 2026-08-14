@@ -1,9 +1,11 @@
-# Yomi sidecar
+# Yomi sidecar — v0.3.1
 
-Detection + OCR only. Thin, stateless, one endpoint that matters.
+Detection, reading order, and OCR only. Thin, stateless, one endpoint that
+matters.
 
 Everything interesting — orchestration, caching, glossary state, LLM calls —
 lives in ASP.NET Core and is deliberately not here. See `../backend/README.md`.
+Rendering is the Chrome extension's job; see `../extension/README.md`.
 
 ## Where things live
 
@@ -17,7 +19,8 @@ Yomi/
 ├── vendor/     <- GPL checkout    (repo root)
 ├── weights/    <- model weights   (repo root)
 ├── sidecar/    <- you are here
-└── backend/    <- ASP.NET Core
+├── backend/    <- ASP.NET Core
+└── extension/  <- Chrome MV3
 ```
 
 Commands below are written to be run **from this directory** (`sidecar/`), and
@@ -29,14 +32,15 @@ itself, so `./run.sh` works from anywhere.
 `comic-text-detector` and its weights are **GPL-3.0**. This sidecar therefore
 is too. That is fine and in fact load-bearing: GPL obligations trigger on
 distribution, and this process runs only on your machine. The browser
-extension — the one artefact that ever touches an Apple developer account —
-contains no GPL code. Keep it that way.
+extension — the one artefact that ever touches a store review or an Apple
+developer account — contains no GPL code. Keep it that way.
 
 `manga-ocr` is Apache-2.0.
 
-The backend is **AGPL-3.0**, a different and stronger licence — see
-`../README.md` for why the boundary sits at the HTTP seam and what each side
-may and may not link against.
+The backend and the extension are both **MIT**, which they can only stay
+because nothing on either side links anything from here. The GPL stops at the
+HTTP seam — see `../README.md` for why the boundary sits there and what each
+side may and may not link against.
 
 ## Setup
 
@@ -192,6 +196,52 @@ curl -s -X POST localhost:8001/detect/debug \
   -d "{\"imageB64\":\"$(cat /tmp/p.b64)\"}" --output /tmp/debug.png
 ```
 
+## Reading order
+
+Reading order is **panel-major**: you finish one panel before starting the next,
+panels run right-to-left within a row, rows top-to-bottom. That needs panel
+boundaries, and panel boundaries are not recoverable from box geometry. On the
+`ynko` test page the widest gap between boxes (113px) is not a border, the real
+gutter between rows is 28px, and a 61px gap *inside* row 1 exceeds the 49px gap
+that actually separates rows 1 and 2. Any "big gap = panel edge" rule gets that
+page wrong.
+
+So `app/panels.py` goes to the image and finds the drawn borders:
+
+1. Split a double-page spread down its central gutter, **right page first**.
+   Both a landscape aspect and a wide full-height white column are required — an
+   aligned single-page panel grid produces the column on its own, and splitting
+   on it would order the page column-major.
+2. Split each page into vertical strips on full-height white columns. A strip
+   with no drawn border in it is *furniture* — margin commentary, character
+   sidebars — not panels.
+3. Split the panel-bearing strips into rows on scanlines that are >98% white.
+4. Split each row into panels on columns that are >99% white **and flanked
+   within ~6px by a <25%-white column**, i.e. by a drawn border.
+
+Step 4's flanking test is what makes this work. Artwork whitespace produces
+plenty of white columns — 9 in row 3 of the single-page test — and none are
+flanked by borders, so all 9 are correctly rejected. Without it every one
+becomes a false gutter.
+
+`app/ordering.py` then sorts, with two entry points kept deliberately separate:
+
+| | |
+|---|---|
+| `reading_order()` | Pure geometry, no image. Bands regions into rows and sorts each row right-to-left. Used *inside* a panel, and as the fallback when panel detection comes up empty (borderless or blank page) |
+| `panel_reading_order()` | The real thing. Needs the page image |
+
+Furniture is placed by where it falls: above the panel block (a page title)
+reads first, beside or below it reads last.
+
+**Every threshold in `panels.py` is provisional**, validated against two images
+— one page (17/17 regions correctly ordered) and one spread. Two of them have
+non-obvious floors worth knowing before tuning: borders sit hard against the
+gutters, so the surviving pure-white run is only 3–5px even where the gutter
+looks wide (`MIN_GUTTER_PX` must stay ≤2), and scans carry a dark strip along
+the sheet edges that caps *every* column at ~0.994 white (a literal full-height
+test finds nothing at all on a real page).
+
 ## Running without weights
 
 ```bash
@@ -210,8 +260,11 @@ From `sidecar/`:
 pytest -q
 ```
 
-Covers reading-order banding (including the cases a naive `(y, -x)` sort gets
-wrong) and the response contract.
+17 tests: 6 on geometric banding (including the cases a naive `(y, -x)` sort
+gets wrong), 8 on panel segmentation and panel-major order (artwork whitespace
+is not a gutter, sidebars are furniture and read last, a spread orders the right
+page first, a single-page grid is not mistaken for a spread, a blank page falls
+back to geometry), 2 on the response contract, and 1 on the real detector.
 
 `conftest.py` in this directory is empty on purpose: its presence is what puts
 `sidecar/` on `sys.path`, so `import app` resolves under a bare `pytest`. Without
@@ -236,17 +289,20 @@ That takes the suite from 16 passed / 1 skipped to **17 passed**.
 On 10 varied pages: ≥90% of speech bubbles detected, OCR visually correct on a
 manual read-through of `/detect/debug` output.
 
-Judge reading order from the numbered debug PNGs, not from JSON. If the
-numbering is scrambled on multi-panel rows, that is the panel-segmentation
-[OPEN] question arriving early — tune `band_threshold` in `ordering.py`
-first before reaching for real segmentation.
+Judge reading order from the numbered debug PNGs, not from JSON. Scrambled
+numbering on multi-panel rows is now a `panels.py` problem rather than a
+banding one: check whether the page's borders were found at all before reaching
+for `BAND_THRESHOLD` in `ordering.py`. A page whose panels are not detected
+falls back to pure geometry silently and correctly — it just reads in the wrong
+order.
 
 **If OCR accuracy is poor here, the project is dead.** That was why v0.1 was
 this and nothing else.
 
 That gate has since been cleared well enough to build on — v0.2 added the
-backend and a working end-to-end translation — but it has **not** been formally
-signed off against the 10-page criterion above. Spot checks on real pages show
+backend and a working end-to-end translation, v0.3 the extension and the
+overlay — but it has **not** been formally signed off against the 10-page
+criterion above. Spot checks on real pages show
 clean OCR inside speech bubbles and degraded OCR on dense handwritten
 marginalia, which the model then reports as low confidence rather than
 inventing text. Running the full 10 pages is still outstanding.
