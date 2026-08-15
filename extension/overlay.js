@@ -77,7 +77,10 @@
       align-items: center;
       justify-content: center;
       box-sizing: border-box;
-      overflow: hidden;
+      /* Visible, not hidden: the legibility floor in layout() lets a box that
+         cannot fit its text at the minimum size overflow rather than shrink
+         into unreadability, and clipping would defeat that. */
+      overflow: visible;
       text-align: center;
       font-family: "Yomi Letter", "CC Wild Words", "Wild Words", "Anime Ace",
                    "Comic Neue", "Comic Sans MS", system-ui, sans-serif;
@@ -93,49 +96,61 @@
       cursor: default;
     }
 
-    /* Speech and thought: cover the Japanese, because leaving it visible under
-       English is unreadable for both. */
-    /* The seamless trick: the bubble interior is ALREADY white, so a fill that
-       is opaque in the middle and fades to transparent before the edge is
-       invisible against it. No hard rectangle edge, no need to match the
-       bubble's exact outline -- which we cannot know anyway. */
-    .region.bubble, .region.thought {
-      background: radial-gradient(ellipse at center,
-                  #fff 0%, #fff 72%, rgba(255,255,255,0) 100%);
-      color: #111;
-      padding: 4%;
-      overflow: visible;
+    /* --fill, --ink and --halo are set per region from the pixels measured in
+       the service worker. Covering the original is not optional for anything
+       longer than an SFX -- leaving Japanese visible under English makes both
+       unreadable -- so the only open question is what colour to cover it in,
+       and that is a measurement, not a guess about kind. Defaults here are the
+       old white assumption, used only if a region arrives unmeasured. */
+    .region {
+      --fill: #fff;
+      --ink: #111;
+      --halo: #fff;
     }
 
-    /* Narration boxes are usually rectangular. */
+    /* The seamless trick: the fill MATCHES the surface underneath, so a fill
+       that is opaque in the middle and fades to transparent before the edge is
+       invisible against it. No hard rectangle edge, no need to match the
+       bubble's exact outline -- which we cannot know anyway. This is what makes
+       a measured colour so much more forgiving than a white one: on a grey
+       gradient panel a white box is a hole, a grey one is seamless. */
+    .region.bubble, .region.thought {
+      background: radial-gradient(ellipse at center,
+                  var(--fill) 0%, var(--fill) 72%, transparent 100%);
+      color: var(--ink);
+      padding: 4%;
+    }
+
     /* Narration boxes are rectangular and usually sit flush to a border, so
        fade on the long axis only. */
     .region.narration {
       background: linear-gradient(to bottom,
-                  rgba(255,255,255,0) 0%, #fff 6%, #fff 94%, rgba(255,255,255,0) 100%),
-                  #fff;
-      color: #111;
+                  transparent 0%, var(--fill) 6%, var(--fill) 94%, transparent 100%);
+      color: var(--ink);
       padding: 3%;
     }
 
-    /* SFX sits on artwork. Covering it with a white box would destroy the panel,
-       so draw outlined text and let the art show through. */
+    /* SFX ALWAYS outlines, however uniform its pixels turn out to be. It is
+       short, it sits on artwork by nature, and filling behind it destroys the
+       panel for no readability gain. */
     .region.sfx {
-      background: transparent;
-      color: #fff;
-      -webkit-text-stroke: 0.09em #000;
+      background: none !important;
+      color: var(--ink);
+      -webkit-text-stroke: 0.09em var(--halo);
       paint-order: stroke fill;
       letter-spacing: 0.02em;
+      padding: 0;
     }
 
-    /* Text sitting on artwork rather than inside a bubble. A white fill here
-       would punch a hole in the panel, so draw outlined text instead and let the
-       art show through. Black on white outline, because manga art is mostly
-       light with dark linework. Overrides the kind rules above. */
-    .region.on-art {
+    /* Measured as too varied to be a surface -- text sitting on artwork rather
+       than inside a bubble. Any fill here punches a hole in the panel, so draw
+       outlined text and let the art show through. Ink and halo come from the
+       measured luminance, so this works on a dark panel too. Overrides the kind
+       rules above. */
+    .region.busy {
       background: none !important;
-      color: #000;
-      -webkit-text-stroke: 0.14em #fff;
+      color: var(--ink);
+      -webkit-text-stroke: 0.14em var(--halo);
       paint-order: stroke fill;
       padding: 0;
     }
@@ -143,7 +158,6 @@
     /* Anything the model dropped renders as the original Japanese, dimmed, so a
        gap is visible rather than silent. */
     .region.untranslated {
-      background: rgba(255,255,255,0.82);
       color: #666;
       font-style: italic;
     }
@@ -220,8 +234,16 @@
    * Pass 2 picks one size for the page -- a low percentile of the individual
    * maxima -- and applies it everywhere, letting only genuinely tight boxes
    * drop below it. Real lettering works the same way.
+   *
+   * THE FLOOR. Left alone, pass 2 will happily drive every box down to whatever
+   * the tightest one allows. Text at 6px covers the Japanese AND cannot be
+   * read, which is strictly worse than rendering nothing at all. So nothing
+   * renders below MIN_PX; a box that cannot fit its text at that size overflows
+   * instead (hence overflow: visible on .region). Overflow is recoverable by
+   * eye. Unreadable text is not.
    */
   const UNIFORM_PERCENTILE = 0.35;
+  const MIN_PX = 11;
 
   function layout(host, layer, img) {
     const r = positionHost(host, img);
@@ -241,7 +263,7 @@
     const target = sorted[Math.floor(sorted.length * UNIFORM_PERCENTILE)];
 
     els.forEach((el, i) => {
-      el.style.fontSize = `${Math.min(maxima[i], target)}px`;
+      el.style.fontSize = `${Math.max(MIN_PX, Math.min(maxima[i], target))}px`;
     });
   }
 
@@ -267,10 +289,21 @@
     for (const region of page.regions) {
       const el = document.createElement("div");
       const untranslated = !region.english;
-      // onWhite is measured from the pixels underneath, not inferred from kind.
-      const surface = region.onWhite === false ? " on-art" : "";
+      // Busyness is measured from the pixels underneath, not inferred from kind.
+      const surface = region.busy ? " busy" : "";
       el.className =
         `region ${region.kind}${surface}${untranslated ? " untranslated" : ""}`;
+
+      // Fill and text colour follow the measured background rather than an
+      // assumption about what a bubble looks like.
+      if (region.fill) {
+        el.style.setProperty("--fill", `rgb(${region.fill.join(",")})`);
+      }
+      if (region.darkBg !== undefined) {
+        el.style.setProperty("--ink", region.darkBg ? "#f4f4f4" : "#111");
+        el.style.setProperty("--halo", region.darkBg ? "#000" : "#fff");
+      }
+
       el.textContent = untranslated ? region.japanese : region.english;
       el.dataset.jp = region.japanese;
       el.dataset.bounds = JSON.stringify(boundsOf(region.polygon));

@@ -26,6 +26,7 @@ import { bytesToBase64 } from "./lib/bytes.js";
 import { contentHash, get as cacheGet, set as cacheSet } from "./lib/cache.js";
 import { translatePage, mergeRegions, cacheKey, DEFAULTS } from "./lib/translate.js";
 import { deriveSeriesId } from "./lib/series.js";
+import { measureBackground } from "./lib/surface.js";
 
 // A RANGE, not a single id.
 //
@@ -234,24 +235,46 @@ async function preparePage(buffer, mimeType) {
 
 // --- background sampling ---------------------------------------------------
 //
-// Whether it is safe to paint a white fill has nothing to do with the region's
-// KIND. Narration inside a white box is fine; narration set over artwork is the
-// same kind and covering it destroys the panel.
+// The measurement itself lives in lib/surface.js; this is the part that needs
+// the image bytes, which we already hold here in extension origin, so nothing
+// is tainted.
 //
-// The text itself cannot tell us which. The pixels can -- and we already hold
-// the image bytes here, in extension origin, so nothing is tainted.
+// THESE TWO NUMBERS ARE THE TUNING SURFACE. Both are bracketed by synthetic
+// cases, not yet by real pages -- every region's lum/sd/share is logged to the
+// console by content.js precisely so they can be set from real values.
 //
-// Measure: what fraction of the region is near-white? A speech bubble is mostly
-// white with dark glyphs on it. Art, screentone, or a dark panel is not.
-const ON_WHITE_THRESHOLD = 0.55;
+//   BUSY_STD  sits above a grey gradient panel (sd ~0.05, the case this whole
+//             change exists to fix -- it must FILL) and at continuous artwork
+//             (sd ~0.11, which must not). It is the tighter of the two.
+//   MIN_SHARE catches artwork that is uniform on both sides of the split, like
+//             hard screentone, where sd sees nothing. Deliberately low: dense
+//             bold text in a tight box reaches ~0.60, so anything nearer that
+//             starts outlining perfectly good bubbles.
+const BUSY_STD = 0.10;      // luminance sd above which a region is artwork
+const MIN_SHARE = 0.5;      // bg share below which the split found no surface
+const DARK_BG = 0.5;        // bg luminance below which text flips to light ink
 
+/**
+ * Attach fill colour, background luminance and busyness to every region.
+ *
+ * Run on every page including cache hits, not stored as a property of the
+ * translation: it is a rendering decision measured from bytes we already hold,
+ * so tuning a threshold should take effect immediately rather than needing the
+ * cache thrown away.
+ */
 async function annotateBackgrounds(buffer, page) {
+  // Fall back to the old assumption -- a white bubble with dark text -- only if
+  // the pixels are genuinely unavailable.
+  const UNKNOWN = {
+    fill: [255, 255, 255], bgLum: 1, bgStd: 0, bgShare: 1,
+    busy: false, darkBg: false
+  };
+
   let bmp;
   try {
     bmp = await createImageBitmap(new Blob([buffer]));
   } catch {
-    // If decoding fails, assume white -- the previous behaviour.
-    page.regions.forEach((r) => (r.onWhite = true));
+    page.regions.forEach((r) => Object.assign(r, UNKNOWN));
     return page;
   }
 
@@ -268,18 +291,14 @@ async function annotateBackgrounds(buffer, page) {
     const y1 = Math.min(bmp.height, Math.ceil(Math.max(...ys) * bmp.height));
     const w = x1 - x0, h = y1 - y0;
 
-    if (w < 2 || h < 2) { r.onWhite = true; continue; }
+    if (w < 2 || h < 2) { Object.assign(r, UNKNOWN); continue; }
 
-    const data = ctx.getImageData(x0, y0, w, h).data;
-    let near = 0, n = 0;
-    // Every 4th pixel is plenty and keeps this off the critical path.
-    for (let i = 0; i < data.length; i += 16) {
-      const lum = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
-      if (lum > 0.85) near++;
-      n++;
-    }
-    r.whiteFraction = n ? near / n : 1;
-    r.onWhite = r.whiteFraction > ON_WHITE_THRESHOLD;
+    const measured = measureBackground(ctx.getImageData(x0, y0, w, h).data);
+    Object.assign(r, measured ?? UNKNOWN);
+    // No single surface to fill with: this is artwork, and painting over it
+    // would cost more than the readability it buys. Outlined text instead.
+    r.busy = r.bgStd > BUSY_STD || r.bgShare < MIN_SHARE;
+    r.darkBg = r.bgLum < DARK_BG;
   }
 
   bmp.close?.();
@@ -319,6 +338,8 @@ async function translate(ctx) {
 
   const cached = await cacheGet(key);
   if (cached) {
+    // Re-measured rather than trusted from the cache -- see annotateBackgrounds.
+    await annotateBackgrounds(buffer, cached);
     return {
       page: cached, strategy, tried, cached: true,
       timing: {

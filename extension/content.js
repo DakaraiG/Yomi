@@ -119,6 +119,25 @@
           english: r.english
         }))
       );
+      // The measured surface, so BUSY_STD and MIN_SHARE in background.js can be
+      // tuned against real numbers rather than guessed at. `busy` regions get
+      // outlined text and no fill; everything else is covered in `fill`.
+      //
+      // What to look for: a region that renders unreadably should show either a
+      // `fill` that does not match what you see on the page, or `busy` set on
+      // something that is plainly a flat surface (sd too low a bar) -- or
+      // cleared on something that is plainly artwork (sd too high).
+      console.table(
+        page.regions.map((r) => ({
+          order: r.order,
+          kind: r.kind,
+          lum: r.bgLum,
+          sd: r.bgStd,
+          share: r.bgShare,
+          busy: r.busy,
+          fill: r.fill ? `rgb(${r.fill.join(",")})` : "—"
+        }))
+      );
 
       if (page.regions.length === 0) {
         console.warn(
