@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Yomi detection worker</title>
+<!--
+  Never shown. An offscreen document is a real page with a DOM that the user
+  cannot see, which is exactly what the detector needs and exactly what a
+  service worker cannot provide:
+
+    - Service workers are killed on idle, routinely and without warning. A
+      model load takes seconds and inference takes hundreds of milliseconds;
+      being terminated halfway through leaves no error, just silence.
+    - ORT's WASM backend wants a document to attach to.
+
+  Everything here runs on the extension origin, so the model and runtime load
+  from extension URLs and nothing crosses the network.
+-->
+<script type="module" src="offscreen.js"></script>

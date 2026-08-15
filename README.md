@@ -1,141 +1,122 @@
 # Yomi
 
-Reads Japanese manga in the browser: detects the text on a page, OCRs it,
-translates it with a vision model, and draws the English back over the artwork.
+Reads Japanese manga in the browser: finds the text on a page, translates it,
+and draws the English back over the artwork. One Chrome extension, no servers.
 
-**v0.3.1.** End to end and usable. Click the toolbar button on a manga page and
-the translation appears in place, fitted to the original bubbles. Chrome only,
-manual trigger, everything on localhost. Glossary, prefetch, and Safari are
-later milestones.
+**v0.4.** Load it unpacked, add an API key, click the toolbar button.
+
+## What changed in v0.4
+
+v0.3 was three processes: a Python sidecar for detection and OCR, an ASP.NET
+backend for orchestration and the model call, and the extension. It worked, and
+it required starting two servers before opening a manga page — fine for
+development, unacceptable as a thing to actually use.
+
+**The change that collapsed it: the translation model transcribes the Japanese
+itself.** It was caught doing so unprompted. That removed `manga-ocr` from the
+pipeline, which was the single hardest component to port — it decodes
+autoregressively, one forward pass per character, and is brutally slow without
+hardware acceleration. With OCR gone, detection was the only remaining native
+dependency, and a 4.7MB ONNX model replaced it.
+
+Licensing simplified as a side effect. The whole three-way split existed because
+`comic-text-detector` is GPL-3.0, so anything linking it inherited the licence
+and had to live in its own process. Its replacement is Apache-2.0, nothing in
+the tree is GPL any more, and the repository is MIT throughout.
+
+The v0.3 architecture is preserved at the tag **`v0.3-server-architecture`** —
+Python sidecar, .NET backend, contract tests, and READMEs describing all three:
+
+```bash
+git checkout v0.3-server-architecture
+```
+
+## Pipeline
+
+```
+toolbar click
+  → find page images                     content script
+  → retrieval ladder                     service worker
+      direct fetch → Referer spoof → screenshot
+  → cache lookup (content hash + model)  IndexedDB
+  → detect → group → order → number      offscreen document, ONNX + WebGPU
+  → transcribe + translate               one API call
+  → merge onto local geometry → overlay
+```
+
+**Geometry never comes from the model.** It returns text keyed by region id;
+polygons and reading order come from local detection. Vision models are bad at
+coordinates, and the overlay depends on real ones.
 
 ## Layout
 
 ```
 Yomi/
-├── sidecar/     Python + FastAPI. Detection + OCR.        GPL-3.0
-├── backend/     ASP.NET Core. Orchestration + LLM call.   MIT
-├── extension/   Chrome MV3. Retrieval + overlay.          MIT
-├── vendor/      GPL checkout of comic-text-detector       (gitignored)
-├── weights/     Model weights, ~700MB                     (gitignored)
-├── .venv/       Python env for the sidecar                (gitignored)
-└── try_page.py  Poke the sidecar with one page
+├── extension/     the whole product                     MIT
+│   ├── lib/       detection, grouping, ordering, prompt, cache
+│   ├── models/    PaddleOCR detection model    (fetched, gitignored)
+│   └── vendor/    ONNX Runtime Web             (fetched, gitignored)
+├── tools/bakeoff/ detector comparison harness, tests
+├── fixtures/      test pages + comic-text-detector baseline
+└── weights/       bake-off candidate models    (fetched, gitignored)
 ```
 
-`vendor/`, `weights/`, and `.venv/` are **not in the repo** and are re-created by
-setup. They sit at the root rather than inside `sidecar/` because they are large,
-licence-encumbered, or both. Anything that needs them resolves upward from its
-own location — see `sidecar/run.sh`.
+## Setup
 
-## The three processes
-
-Three programs, two ports, deliberately never merged:
-
-```
-extension        Chrome MV3      MIT       image retrieval, overlay rendering
-       │  POST /v1/translate
-       ▼
-backend  :5080   ASP.NET Core    MIT       caching, prompt, provider call
-       │  POST /detect
-       ▼
-sidecar  :8001   FastAPI         GPL-3.0   comic-text-detector + manga-ocr
-```
-
-The backend calls the sidecar over HTTP. **Do not add a project reference
-between them, and do not merge them.**
-
-That seam is a licence boundary. `comic-text-detector` is GPL-3.0, so anything
-linking it is too — which is why detection lives in its own process. The backend
-links nothing GPL and is MIT, as is the extension. The extension in particular
-is the one artefact that would ever go through a store review or an Apple
-developer account, so it must contain no GPL code at all.
-
-Division of labour, which the licence split happens to match exactly:
-
-| | |
-|---|---|
-| extension | Finds the page image, gets its bytes, measures what is under each region, draws the result |
-| backend | Hashes, caches, builds the prompt, calls the model, merges model text onto sidecar geometry |
-| sidecar | Finds the boxes, reads them, puts them in reading order |
-
-Geometry and reading order come from the sidecar and are never asked of the
-model. Coordinates are normalised 0–1 the whole way through; nothing outside the
-sidecar sees a pixel coordinate.
-
-## Quickstart
-
-Full setup is in each component's README — this is the short version, assuming
-`vendor/`, `weights/`, and `.venv/` already exist.
-
-**Terminal 1 — sidecar.** Takes ~8s to load models.
+Needs Node only for the tooling; the extension itself has no build step and no
+npm dependencies.
 
 ```bash
-cd sidecar && ./run.sh
-curl -s localhost:8001/health
-# {"status":"ok","detector":"comic-text-detector","ocr":"manga-ocr","device":"cpu"}
+cd tools/bakeoff
+npm install
+node fetch-models.mjs paddle-v4
+node install-extension-assets.mjs
 ```
 
-If `detector` or `ocr` reads `stub`, the env vars aren't reaching it — fix that
-rather than working around it. `run.sh` sets them for you.
+That puts ~31MB of ONNX Runtime and the detection model into `extension/`.
+Neither is committed — both are reproducible from npm and a pinned URL.
 
-**Terminal 2 — backend.** Needs an API key set once, see
-[`backend/README.md`](backend/README.md).
+Then in Chrome: `chrome://extensions` → Developer mode → **Load unpacked** →
+select the `extension/` folder (a directory on your Mac, not a URL). Open the
+extension's options page and paste an API key.
 
-```bash
-cd backend/Yomi.Api && dotnet run --launch-profile http
-curl -s localhost:5080/health
-```
-
-Port **5080**, not 5000 — macOS binds 5000 for AirPlay Receiver.
-
-**Chrome — extension.** Load `extension/` unpacked at `chrome://extensions`
-(Developer mode on → *Load unpacked* → pick the `extension/` folder, a directory
-on your Mac, not a URL). Then open a manga page and click the Yomi toolbar
-button. Details and troubleshooting in
+Full details, including the retrieval ladder and rendering rules, are in
 [`extension/README.md`](extension/README.md).
-
-**Try a page without the browser.** Detection and OCR only, with an annotated
-render:
-
-```bash
-./try_page.py ~/Downloads/page.jpg      # a file on your Mac, not a URL
-```
-
-Full translation through the backend, still without the browser — see
-[`backend/README.md`](backend/README.md#trying-it).
 
 ## Tests
 
 ```bash
-cd sidecar && pytest -q                    # 16 passed, 1 skipped
-cd backend/Yomi.Api.Tests && dotnet test   # 14 passed
+cd tools/bakeoff && npm test        # 34 passing
 ```
 
-The skipped Python test covers the vendored import chain and needs the detector
-env vars; `sidecar/README.md` has the invocation that takes it to 17 passed.
-
-The .NET suite boots the real API in memory and fakes only the two network
-edges (sidecar, provider), so routing, JSON serialisation, merge logic, and
-caching are all exercised for real. `dotnet test` must be run from
-`backend/Yomi.Api.Tests/` — there is no solution file at `backend/`, so running
-it a directory up fails with "Specify a project or solution file".
-
-The extension has no automated tests; it is checked by using it, with the
-console log and the toast as the instrumentation.
+Covers reading order against the v0.3 Python implementation on real pages,
+`seriesId` derivation, and a regression guard for the IndexedDB hang. The
+detector comparison harness and its methodology are in
+[`tools/bakeoff/README.md`](tools/bakeoff/README.md).
 
 ## Status
 
 | | |
 |---|---|
-| Detection + OCR | working, real weights |
-| Panel-aware reading order | working, thresholds validated on two pages |
-| Translation | working, `gpt-5.6-luna` via the Responses API |
-| Overlay rendering | working — fitted, uniform-size, shadow-DOM isolated |
-| Image retrieval | three tiers: direct fetch → spoofed Referer → screenshot |
-| Cost | ~$0.0022–0.0025 per page, dominated by image tokens |
-| Caching | in-memory, 24h, lost on restart |
-| Glossary | v0.4, not started — `glossaryVersion` is always 0 |
-| Auto-trigger on scroll | v0.5, not started — the button is manual |
+| Detection | PaddleOCR DB mobile, Apache-2.0, 4.7MB — 92.3% recall vs the v0.3 baseline |
+| Speed | ~230ms detection on WebGPU; a page is dominated by the model call |
+| Grouping | lines → blocks via panels + bubble enclosure, 95.7% exact |
+| Reading order | panel-major, ported from v0.3 and verified identical on the test pages |
+| Translation | `gpt-5.6-luna` via the Responses API, transcribing and translating in one call |
+| Cost | ~$0.0027 per page, dominated by image tokens |
+| Cache | IndexedDB, keyed by content hash + model id |
+| Glossary | not started — `glossaryVersion` is always 0 |
+| Auto-trigger on scroll | not started; the button is manual |
 | Safari | not started |
 
-`POST /v1/translate`'s request and response bodies are **frozen as of v0.2** and
-unchanged in v0.3.1. Additive header changes are fine; body changes are not.
+## Known trade-offs
+
+**Transcription is better on marginalia and worse on short stylised dialect.**
+The model reads dense margin commentary that manga-ocr rendered as noise, and it
+misread シゴロ (a 4-5-6 dice roll) as ジゴロ, producing a confident, wrong line at
+0.82 confidence. Accepted deliberately: re-reading low-confidence regions costs
+a second call per page, and speed won.
+
+**Detection misses ~8% of regions** the GPL detector found — mostly stylised
+logos and one large region on a spread. Measured, not estimated; see the
+bake-off README.

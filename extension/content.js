@@ -1,12 +1,13 @@
 // Yomi content script.
 //
-// Injected on demand when the toolbar button is clicked (v0.3 is manual
+// Injected on demand when the toolbar button is clicked (still a manual
 // trigger; automatic scroll-based triggering is v0.5).
 //
-// SPIKE SCOPE: this proves the plumbing end to end -- find the page image, get
-// its bytes through the service worker, POST to the backend, receive a
-// TranslatedPage. It logs the result rather than rendering it. Rendering is the
-// next step and slots in where marked.
+// Finds the page images, hands each to the service worker, and renders what
+// comes back. Everything between those two points -- retrieval, detection,
+// grouping, ordering, the model call -- happens out of the page, because a
+// content script can do almost none of it: it cannot fetch cross-origin, and it
+// has no business holding an API key.
 
 (async () => {
   // Re-injection guard. Clicking the toolbar button twice would otherwise run
@@ -33,8 +34,28 @@
       return;
     }
 
+    // Pages are translated CONCURRENTLY, up to a limit.
+    //
+    // Sequentially, a four-image screen costs four ~15s model calls end to end
+    // -- a minute of watching a spinner for work that is almost entirely
+    // waiting. Detection is serialised on the other side of the message
+    // boundary (one ORT session), which is fine, because the model call is
+    // where the time goes and those overlap freely.
+    //
+    // Bounded rather than unbounded: an unbounded fan-out on a long-strip
+    // reader would fire a dozen paid requests at once and invite a rate limit.
+    const CONCURRENCY = 3;
     let done = 0;
-    for (const img of images) {
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < images.length) {
+        const img = images[cursor++];
+        await translateOne(img);
+      }
+    };
+
+    const translateOne = async (img) => {
       console.log(
         `[yomi] requesting ${img.naturalWidth}x${img.naturalHeight} ${img.src}`
       );
@@ -44,6 +65,9 @@
         type: "YOMI_TRANSLATE",
         imageUrl: img.src,
         pageUrl: location.href,
+        // Last-resort signal for series identity, used only when the URL
+        // carries none -- readers keyed entirely on chapter uuids.
+        pageTitle: document.title,
         // Only used if retrieval falls through to the screenshot strategy.
         dpr: window.devicePixelRatio,
         rect: {
@@ -56,21 +80,33 @@
         const raw = result?.error ?? "no response";
         // Turn backend status codes into something a user can act on.
         const friendly =
-          /503/.test(raw) ? "Detection sidecar isn't running"
-          : /502/.test(raw) ? "Translation failed — check your API key"
+          /No API key/i.test(raw) ? "No API key — open the extension's options"
+          : /did not respond within/i.test(raw) ? "Translation timed out — try again"
+          : /Provider returned 429/.test(raw) ? "Rate limited — wait a moment"
+          : /Provider returned 4\d\d/.test(raw) ? "Translation refused — check your API key"
           : /all retrieval/.test(raw) ? "Couldn't read this image"
           : raw.slice(0, 90);
         window.__yomiToast?.(friendly, "error");
         console.error("[yomi] failed:", raw);
-        continue;
+        return;
       }
 
       const { page, timing } = result;
+      const stages = result.marks
+        ? " · " + Object.entries(result.marks).map(([k, v]) => `${k} ${v}ms`).join(" ")
+        : "";
       console.log(
         `[yomi] ${page.regions.length} regions in ${timing.totalMs}ms ` +
-        `via ${result.strategy} ` +
-        `(${Math.round(timing.bytes / 1024)}KB, retrieve ${timing.fetchMs}ms)`
+        `via ${result.strategy}${result.cached ? " (cached)" : ""} ` +
+        `on ${result.backend ?? "—"} ` +
+        `(${Math.round(timing.bytes / 1024)}KB, retrieve ${timing.fetchMs}ms)${stages}`
       );
+      if (result.backendWarning) console.warn("[yomi]", result.backendWarning);
+      if (result.usage) {
+        console.log(
+          `[yomi] tokens in=${result.usage.inputTokens} ` +
+          `out=${result.usage.outputTokens} reasoning=${result.usage.reasoningTokens}`);
+      }
       if (result.tried?.length) {
         console.log("[yomi] fell back after:", result.tried.join(" | "));
       }
@@ -84,9 +120,23 @@
         }))
       );
 
-      // Sanity checks worth having here rather than only in the C# tests: this
-      // is the first place the contract crosses a process boundary for real.
-      if (typeof page.regions[0]?.kind !== "string") {
+      if (page.regions.length === 0) {
+        console.warn(
+          `[yomi] no text found on this image (via ${result.strategy}). ` +
+          (result.strategy === "screenshot"
+            ? "The screenshot tier only captures what is on screen — scroll the " +
+              "page fully into view and retry."
+            : "The page may genuinely have no text."));
+        window.__yomiToast?.("No text found on that page", "error");
+        return;
+      }
+
+      // Sanity check worth having here: this is the first place the contract
+      // crosses a process boundary for real. Guarded by the emptiness check
+      // above -- an empty page has no regions[0], and reporting "kind is not a
+      // string: undefined" for it sends you hunting a serialisation bug that
+      // does not exist.
+      if (typeof page.regions[0].kind !== "string") {
         console.error("[yomi] CONTRACT: kind is not a string", page.regions[0]);
       }
       // Only meaningful on the fetch paths. The screenshot strategy crops to
@@ -106,7 +156,10 @@
       window.__yomiToast?.(
         `${done}/${images.length} translated · ${page.regions.length} regions`,
         done === images.length ? "done" : "busy");
-    }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, images.length) }, worker));
   } finally {
     window.__yomiRunning = false;
   }

@@ -1,0 +1,17 @@
+onnxruntime-web 1.27.0 — MIT
+https://github.com/microsoft/onnxruntime
+
+Fetched by tools/bakeoff/install-extension-assets.mjs, not committed:
+  ort.bundle.min.mjs                entry point (WASM + WebGPU)
+  ort-wasm-simd-threaded.jsep.mjs   glue, dynamically imported by it
+  ort-wasm-simd-threaded.jsep.wasm  the binary
+
+MV3 forbids remote code, so the runtime ships with the extension rather than
+loading from a CDN.
+
+DO NOT hand-pick these companion files. ORT ships four interchangeable WASM
+variants — plain, jsep, asyncify, jspi — and each entry point imports exactly
+one pair, with no relationship to its own name: ort.bundle.min.mjs wants jsep,
+ort.webgpu.bundle.min.mjs wants asyncify. The installer reads the entry point
+and copies what it actually references. Shipping the wrong pair fails at
+runtime as "no available backend found", naming neither file nor variant.

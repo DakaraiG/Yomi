@@ -1,5 +1,15 @@
 // Yomi service worker.
 //
+// v0.4: a thin router. It owns three things a page cannot -- cross-origin
+// fetches, the API key, and the cache -- and delegates everything else. The
+// heavy work (detection, grouping, ordering, the numbered render) lives in the
+// offscreen document, because the model session takes seconds to build and this
+// worker gets killed on idle.
+//
+//   retrieval ladder  -> offscreen: detect + group + order + number
+//                     -> provider: transcribe + translate
+//                     -> merge onto local geometry -> overlay
+//
 // IMAGE RETRIEVAL IS A LADDER, not a single method. Manga hosts vary from
 // wide-open to actively hostile, and the failure is always the same 403, so the
 // only way to know which method works is to try them in order.
@@ -12,8 +22,27 @@
 //     Access-Control-Allow-Origin.
 // Each approach fails on exactly what the other solves. Hence tier 2.
 
-const BACKEND = "http://localhost:5080";
-const DNR_RULE_ID = 8801;
+import { bytesToBase64 } from "./lib/bytes.js";
+import { contentHash, get as cacheGet, set as cacheSet } from "./lib/cache.js";
+import { translatePage, mergeRegions, cacheKey, DEFAULTS } from "./lib/translate.js";
+import { deriveSeriesId } from "./lib/series.js";
+
+// A RANGE, not a single id.
+//
+// Concurrent translations each need their own Referer rule. Sharing one id
+// means the second request's rule replaces the first's before the first has
+// fetched, and the first's teardown then removes the second's -- so BOTH fall
+// through to the screenshot tier with a 403, on hosts where tier 2 works
+// perfectly in isolation. The bug only appears once pages are translated in
+// parallel, and it looks like the CDN getting stricter.
+const DNR_RULE_BASE = 8801;
+const DNR_RULE_SLOTS = 16;
+let dnrCursor = 0;
+
+function nextRuleId() {
+  dnrCursor = (dnrCursor + 1) % DNR_RULE_SLOTS;
+  return DNR_RULE_BASE + dnrCursor;
+}
 
 // --- tier 1: direct fetch --------------------------------------------------
 // Works on: permissive hosts, blob: and data: URLs (some readers build object
@@ -21,22 +50,29 @@ const DNR_RULE_ID = 8801;
 async function fetchDirect({ imageUrl }) {
   const r = await fetch(imageUrl);
   if (!r.ok) throw new Error(`direct ${r.status}`);
-  return await r.arrayBuffer();
+  return { buffer: await r.arrayBuffer(), mimeType: r.headers.get("content-type") };
 }
 
 // --- tier 2: fetch with a spoofed Referer ----------------------------------
 // Rewrites our own request headers so it looks like an ordinary in-page image
 // load. Handles the common case: CDNs that check Referer.
+//
+// SAFARI HAS NO declarativeNetRequest modifyHeaders, so this tier is simply
+// absent there rather than broken -- hence the capability check rather than a
+// hard dependency. On Safari the ladder is tier 1 then tier 3.
 async function fetchWithReferer({ imageUrl, pageUrl }) {
+  if (!chrome.declarativeNetRequest?.updateSessionRules) {
+    throw new Error("declarativeNetRequest unavailable on this browser");
+  }
   if (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:")) {
     throw new Error("not applicable to blob/data URLs");
   }
-  const origin = new URL(pageUrl).origin;
 
+  const ruleId = nextRuleId();
   await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [DNR_RULE_ID],
+    removeRuleIds: [ruleId],
     addRules: [{
-      id: DNR_RULE_ID,
+      id: ruleId,
       priority: 1,
       action: {
         type: "modifyHeaders",
@@ -55,12 +91,12 @@ async function fetchWithReferer({ imageUrl, pageUrl }) {
   try {
     const r = await fetch(imageUrl, { headers: { "x-yomi-retry": "1" } });
     if (!r.ok) throw new Error(`referer ${r.status}`);
-    return await r.arrayBuffer();
+    return { buffer: await r.arrayBuffer(), mimeType: r.headers.get("content-type") };
   } finally {
-    // Always tear the rule down. A lingering rule that rewrites Referer on
+    // Always tear our OWN rule down. A lingering rule that rewrites Referer on
     // unrelated requests is a genuinely nasty bug to track down later.
     await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [DNR_RULE_ID]
+      removeRuleIds: [ruleId]
     });
   }
 }
@@ -74,7 +110,8 @@ async function fetchWithReferer({ imageUrl, pageUrl }) {
 //   - Only what is on screen. A tall page scrolled halfway gives you half a page.
 //   - Resolution is viewport x devicePixelRatio, not native. On a retina display
 //     that is often ~2x and adequate; on an external 1080p monitor it may not be.
-//     Panel gutters are 3-5px at native, so this degrades detection quietly.
+//     Panel gutters are 3-5px at native, and panel detection reads drawn borders,
+//     so this degrades reading order quietly rather than loudly.
 async function captureFromScreen({ tabId, rect, dpr }) {
   if (!rect) throw new Error("no rect supplied");
   if (rect.top < 0 || rect.bottom > rect.viewportHeight) {
@@ -95,7 +132,17 @@ async function captureFromScreen({ tabId, rect, dpr }) {
 
   // Extension-origin pixels, so nothing is tainted.
   const blob = await canvas.convertToBlob({ type: "image/png" });
-  return await blob.arrayBuffer();
+
+  // A capture far smaller than a manga page is not a page. Zoomed-out readers
+  // and partially-scrolled images both produce one, and it detects as zero
+  // regions -- which reads as "this page has no text" rather than "we
+  // photographed a thumbnail".
+  if (sw < 400 || sh < 400) {
+    throw new Error(
+      `screenshot too small (${sw}x${sh}) — zoom in or scroll the page into view`);
+  }
+
+  return { buffer: await blob.arrayBuffer(), mimeType: "image/png" };
 }
 
 const STRATEGIES = [
@@ -108,13 +155,81 @@ async function getImageBytes(ctx) {
   const tried = [];
   for (const [name, fn] of STRATEGIES) {
     try {
-      const buffer = await fn(ctx);
-      return { buffer, strategy: name, tried };
+      const { buffer, mimeType } = await fn(ctx);
+      return { buffer, mimeType: mimeType || "image/png", strategy: name, tried };
     } catch (err) {
       tried.push(`${name}: ${err.message}`);
     }
   }
   throw new Error(`all retrieval strategies failed — ${tried.join(" | ")}`);
+}
+
+// --- offscreen document ----------------------------------------------------
+
+let offscreenReady = null;
+
+/**
+ * Create the offscreen document once.
+ *
+ * Guarded by a shared promise: two pages translated in quick succession both
+ * reach here, and createDocument throws if one already exists. The check-then-
+ * create is not atomic, so the promise is what actually prevents the race.
+ */
+function ensureOffscreen() {
+  offscreenReady ??= (async () => {
+    const existing = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"]
+    });
+    if (existing.length) return;
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["WORKERS"],
+      justification:
+        "Runs the ONNX text detector. The service worker is terminated on idle, " +
+        "which would kill an in-flight inference and discard the loaded model."
+    });
+  })().catch((err) => {
+    offscreenReady = null;             // a failed creation must be retryable
+    throw err;
+  });
+  return offscreenReady;
+}
+
+/**
+ * Hand the bytes to the offscreen document and get the numbered page back.
+ *
+ * Bytes cross as base64 rather than as an ArrayBuffer: extension messages are
+ * serialised, and a buffer arrives at the other end as an empty object with no
+ * error raised. It costs a copy and about 33% in size, which is the price of
+ * the boundary.
+ *
+ * The retry is for a real race. createDocument resolves once the document
+ * EXISTS, not once its module script has run, so the first message can arrive
+ * before the listener is registered and comes back as "Could not establish
+ * connection" -- which looks like a missing offscreen document rather than a
+ * timing problem, and only on the first translation after the worker restarts.
+ */
+async function preparePage(buffer, mimeType) {
+  const message = {
+    target: "yomi-offscreen",
+    imageB64: bytesToBase64(buffer),
+    mimeType
+  };
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await ensureOffscreen();
+    try {
+      const response = await chrome.runtime.sendMessage(message);
+      if (!response) throw new Error("offscreen document did not reply");
+      if (!response.ok) throw new Error(response.error);
+      return response;
+    } catch (err) {
+      const connecting = /Could not establish connection|Receiving end does not exist/
+        .test(String(err?.message ?? err));
+      if (!connecting || attempt === 2) throw err;
+      await new Promise((r) => setTimeout(r, 150 * (attempt + 1)));
+    }
+  }
 }
 
 // --- background sampling ---------------------------------------------------
@@ -171,57 +286,115 @@ async function annotateBackgrounds(buffer, page) {
   return page;
 }
 
-// --- helpers ---------------------------------------------------------------
+// --- settings --------------------------------------------------------------
 
-function bytesToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const CHUNK = 0x8000;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+async function loadSettings() {
+  const stored = await chrome.storage.local.get(["apiKey", "model", "reasoningEffort"]);
+  if (!stored.apiKey) {
+    throw new Error("No API key set. Open the extension's options page and add one.");
   }
-  return btoa(binary);
+  return {
+    apiKey: stored.apiKey,
+    model: stored.model || DEFAULTS.model,
+    reasoningEffort: stored.reasoningEffort || DEFAULTS.reasoningEffort
+  };
 }
 
-function deriveSeriesId(pageUrl) {
-  try {
-    const u = new URL(pageUrl);
-    const seg = u.pathname.split("/").filter(Boolean)[0] ?? "unknown";
-    return `${u.hostname}/${seg}`;
-  } catch {
-    return "unknown";
-  }
-}
+// --- the pipeline ----------------------------------------------------------
 
 async function translate(ctx) {
   const started = performance.now();
-  const { buffer, strategy, tried } = await getImageBytes(ctx);
+  const settings = await loadSettings();
+
+  const { buffer, mimeType, strategy, tried } = await getImageBytes(ctx);
   const fetchedAt = performance.now();
 
-  const apiResponse = await fetch(`${BACKEND}/v1/translate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      imageB64: bytesToBase64(buffer),
-      seriesId: deriveSeriesId(ctx.pageUrl),
-      targetLang: "en"
-    })
+  // Hashed from the ORIGINAL bytes, never the numbered render -- the render
+  // depends on detection, so keying on it would defeat the point of the cache.
+  const hash = await contentHash(buffer);
+  const seriesId = deriveSeriesId(ctx.pageUrl, { title: ctx.pageTitle });
+  const key = cacheKey({
+    contentHash: hash, seriesId, targetLang: "en", model: settings.model
   });
 
-  if (!apiResponse.ok) {
-    const body = await apiResponse.text();
-    throw new Error(`Backend ${apiResponse.status}: ${body.slice(0, 200)}`);
+  const cached = await cacheGet(key);
+  if (cached) {
+    return {
+      page: cached, strategy, tried, cached: true,
+      timing: {
+        bytes: buffer.byteLength,
+        fetchMs: Math.round(fetchedAt - started),
+        totalMs: Math.round(performance.now() - started)
+      }
+    };
   }
 
-  const page = await annotateBackgrounds(buffer, await apiResponse.json());
+  const prepared = await preparePage(buffer, mimeType);
+  const preparedAt = performance.now();
+
+  if (prepared.regions.length === 0) {
+    // Not an error. A page with no text is a legitimate outcome, and the overlay
+    // needs to be able to say "nothing here" rather than hang.
+    //
+    // DELIBERATELY NOT CACHED. An empty result is far more often a degraded
+    // retrieval than a genuinely blank page -- a screenshot fallback that
+    // captured a partly-scrolled or tiny region hashes consistently, so caching
+    // it pins that page to zero regions permanently and no amount of retrying
+    // recovers it. Re-running detection costs ~230ms; getting this wrong costs
+    // the page.
+    const empty = {
+      contentHash: hash,
+      naturalWidth: prepared.naturalWidth,
+      naturalHeight: prepared.naturalHeight,
+      regions: [],
+      glossaryVersion: 0
+    };
+    return {
+      page: empty, strategy, tried, backend: prepared.backend,
+      timing: { bytes: buffer.byteLength, totalMs: Math.round(performance.now() - started) }
+    };
+  }
+
+  const translated = await translatePage({
+    imageB64: prepared.numbered,
+    regionCount: prepared.regions.length,
+    seriesId,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    reasoningEffort: settings.reasoningEffort
+  });
+
+  const page = {
+    contentHash: hash,
+    naturalWidth: prepared.naturalWidth,
+    naturalHeight: prepared.naturalHeight,
+    // Geometry and reading order come from local detection; only the language
+    // fields come from the model.
+    regions: mergeRegions(prepared.regions, translated.regions),
+    glossaryVersion: 0
+  };
+
+  await annotateBackgrounds(buffer, page);
+
+  // Fire and forget. Caching is a side effect of translating, not part of
+  // delivering the result, and awaiting it once made a cache bug indistinguish-
+  // able from the whole pipeline hanging.
+  void cacheSet(key, page).catch(() => {});
 
   return {
-    page,
-    strategy,
-    tried,
+    page, strategy, tried, cached: false,
+    backend: prepared.backend,
+    backendWarning: prepared.backendWarning,
+    marks: prepared.marks,
+    usage: {
+      inputTokens: translated.inputTokens,
+      outputTokens: translated.outputTokens,
+      reasoningTokens: translated.reasoningTokens
+    },
     timing: {
       bytes: buffer.byteLength,
       fetchMs: Math.round(fetchedAt - started),
+      detectMs: Math.round(preparedAt - fetchedAt),
       totalMs: Math.round(performance.now() - started)
     }
   };
@@ -242,7 +415,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   translate({ ...msg, tabId: sender.tab?.id })
     .then((result) => sendResponse({ ok: true, ...result }))
-    .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
 
   return true;   // keeps the channel open for the async reply
 });

@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Yomi settings</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 14px/1.5 system-ui, sans-serif;
+    max-width: 34rem; margin: 3rem auto; padding: 0 1.25rem;
+  }
+  h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+  p.sub { margin-top: 0; opacity: 0.7; }
+  label { display: block; margin-top: 1.5rem; font-weight: 600; }
+  input, select {
+    width: 100%; margin-top: 0.35rem; padding: 0.5rem;
+    font: inherit; font-family: ui-monospace, monospace;
+    border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    border-radius: 6px; background: transparent; color: inherit;
+  }
+  small { display: block; margin-top: 0.35rem; opacity: 0.7; font-family: system-ui, sans-serif; }
+  button {
+    margin-top: 1.5rem; padding: 0.55rem 1.1rem; font: inherit; font-weight: 600;
+    border: 0; border-radius: 6px; background: #2f6fed; color: #fff; cursor: pointer;
+  }
+  #status { margin-left: 0.75rem; opacity: 0; transition: opacity 0.15s; }
+  #status.show { opacity: 1; }
+</style>
+
+<h1>Yomi</h1>
+<p class="sub">Everything runs on this machine except the translation call.</p>
+
+<label for="apiKey">API key</label>
+<input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
+<small>
+  Stored in this extension's local storage and sent only to the provider below,
+  in a request header. It is never logged and never written to a page.
+</small>
+
+<label for="model">Model</label>
+<input id="model" type="text" placeholder="gpt-5.6-luna" spellcheck="false">
+<small>Verify the id against the provider's model list — a wrong one fails at call time, not at startup.</small>
+
+<label for="reasoningEffort">Reasoning effort</label>
+<select id="reasoningEffort">
+  <option value="none">none</option>
+  <option value="minimal">minimal</option>
+  <option value="low">low</option>
+  <option value="medium">medium</option>
+  <option value="high">high</option>
+  <option value="xhigh">xhigh</option>
+</select>
+<small>Thinking tokens bill at output rates. Low is the tested default.</small>
+
+<button id="save">Save</button><span id="status">Saved</span>
+
+<h2 style="font-size:1rem;margin-top:2.5rem">Cache</h2>
+<p class="sub" id="cacheStats" style="margin-top:0">…</p>
+<small>
+  Translated pages are stored locally and keyed by image content and model, so
+  re-reading a page costs nothing. Clear it if a page is stuck showing the wrong
+  result — for instance one captured through the screenshot fallback while it
+  was only partly on screen.
+</small>
+<button id="clearCache" style="background:#7f1d1d">Clear cache</button>
+
+<script type="module" src="options.js"></script>

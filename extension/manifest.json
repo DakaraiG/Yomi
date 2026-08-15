@@ -1,16 +1,18 @@
 {
   "manifest_version": 3,
   "name": "Yomi (dev)",
-  "version": "0.3.0",
-  "description": "Manga translation overlay \u2014 development build.",
+  "version": "0.4.0",
+  "description": "Manga translation overlay — development build.",
+  "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
     "scripting",
+    "storage",
+    "offscreen",
     "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
-    "http://localhost:5080/*",
-    "http://127.0.0.1:5080/*",
+    "https://api.openai.com/*",
     "<all_urls>"
   ],
   "background": {
@@ -18,6 +20,16 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Yomi \u2014 translate this page"
-  }
+    "default_title": "Yomi — translate this page"
+  },
+  "options_page": "options.html",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["fonts/*.ttf"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

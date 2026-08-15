@@ -1,26 +1,32 @@
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
 .DS_Store
+node_modules/
 
-# .NET build output
-bin/
-obj/
+# Leftovers from the v0.3 sidecar, both dead as of v0.4 and both safe to delete.
+# Kept ignored rather than dropped: vendor/ is the GPL-3.0 comic-text-detector
+# checkout, and it is a git repo, so without this rule `git add -A` stages it as
+# a gitlink — a GPL reference committed into an MIT tree.
+/vendor/
+/.venv/
+__pycache__/
+.pytest_cache/
 
-# User secrets live outside the repo (~/.microsoft/usersecrets), but never
-# let a stray local override in.
-appsettings.*.local.json
+# Model weights and ONNX runtime binaries — ~200MB of bake-off candidates plus
+# the extension's own runtime. All reproducible from npm and pinned URLs, so
+# they are fetched rather than committed:
+#   tools/bakeoff/fetch-models.mjs
+#   tools/bakeoff/install-extension-assets.mjs
+/weights/
+/extension/vendor/ort/*.wasm
+/extension/vendor/ort/*.mjs
+/extension/models/*.onnx
 
-# GPL clone — re-created by setup, never committed
-vendor/
+# tools/ is scratch space, EXCEPT the bake-off harness, which is real source.
+# Written as /tools/* rather than /tools because git cannot re-include anything
+# inside a directory that has itself been excluded — `!/tools/bakeoff/` under a
+# bare `/tools` rule is silently ignored.
+/tools/*
+!/tools/bakeoff/
 
-# Model weights — hundreds of MB, GitHub rejects >100MB
-weights/
-models/
-*.pt
-*.pt.onnx
-*.ckpt
-
-# Debug renders
-*.debug.png
+# Bake-off fixtures: the pages are committed so comparisons are reproducible,
+# the renders they generate are not.
+/fixtures/out/
