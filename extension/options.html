@@ -50,6 +50,16 @@
 </select>
 <small>Thinking tokens bill at output rates. Low is the tested default.</small>
 
+<label for="autoLimit">Auto-translate ceiling</label>
+<input id="autoLimit" type="number" min="0" step="1" placeholder="50">
+<small>
+  Clicking the toolbar button arms a tab: pages then translate as you scroll to
+  them. This is the most paid pages that will ever cost you in one browser
+  session without a click. Cached pages are free and never counted, so
+  re-reading costs nothing. Set 0 to stop scrolling from spending anything.
+  <span id="budgetNow"></span>
+</small>
+
 <button id="save">Save</button><span id="status">Saved</span>
 
 <h2 style="font-size:1rem;margin-top:2.5rem">Cache</h2>

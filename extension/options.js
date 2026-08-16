@@ -7,22 +7,32 @@
 
 import { DEFAULTS } from "./lib/translate.js";
 import { clear as clearCache, stats as cacheStats } from "./lib/cache.js";
+import { DEFAULT_LIMIT } from "./lib/budget.js";
 
-const fields = ["apiKey", "model", "reasoningEffort"];
+const fields = ["apiKey", "model", "reasoningEffort", "autoLimit"];
 const $ = (id) => document.getElementById(id);
 
 const stored = await chrome.storage.local.get(fields);
 $("apiKey").value = stored.apiKey ?? "";
 $("model").value = stored.model ?? DEFAULTS.model;
 $("reasoningEffort").value = stored.reasoningEffort ?? DEFAULTS.reasoningEffort;
+$("autoLimit").value = stored.autoLimit ?? DEFAULT_LIMIT;
+
+// What has actually been spent, so the number above is not just a policy but a
+// reading. Lives in storage.session, so it clears when the browser closes.
+const { autoSpent = 0 } = await chrome.storage.session.get("autoSpent");
+$("budgetNow").textContent =
+  autoSpent > 0 ? ` Used so far this session: ${autoSpent}.` : "";
 
 $("save").addEventListener("click", async () => {
+  const limit = Number.parseInt($("autoLimit").value, 10);
   await chrome.storage.local.set({
     // Trimmed: a key pasted from a terminal picks up a trailing newline, and
     // the resulting 401 says nothing about whitespace.
     apiKey: $("apiKey").value.trim(),
     model: $("model").value.trim() || DEFAULTS.model,
-    reasoningEffort: $("reasoningEffort").value
+    reasoningEffort: $("reasoningEffort").value,
+    autoLimit: Number.isFinite(limit) && limit >= 0 ? limit : DEFAULT_LIMIT
   });
 
   const status = $("status");

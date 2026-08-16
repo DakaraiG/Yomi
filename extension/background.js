@@ -28,6 +28,7 @@ import { translatePage, mergeRegions, cacheKey, DEFAULTS } from "./lib/translate
 import { deriveSeriesId } from "./lib/series.js";
 import { measureBackground, stripStats, snapFill } from "./lib/surface.js";
 import { shapeBox } from "./lib/layout.js";
+import { createBudget, DEFAULT_LIMIT } from "./lib/budget.js";
 
 // A RANGE, not a single id.
 //
@@ -364,6 +365,39 @@ async function annotateBackgrounds(buffer, page) {
   return page;
 }
 
+// --- the spend ceiling -----------------------------------------------------
+//
+// See lib/budget.js. Lives here because this worker is the only thing that
+// knows whether a page actually cost anything: the content script cannot tell a
+// cache hit from a paid call, and counting pages rather than calls would stop a
+// re-read of an already-translated chapter for no reason.
+//
+// Held in storage.session, so it survives this worker being killed on idle --
+// which happens constantly -- and clears when the browser closes. A ceiling
+// that resets every few minutes because the worker was recycled is not a
+// ceiling.
+
+export class BudgetExceededError extends Error {}
+
+const budget = createBudget(DEFAULT_LIMIT);
+let budgetReady = null;
+
+function ensureBudget() {
+  budgetReady ??= (async () => {
+    const [session, local] = await Promise.all([
+      chrome.storage.session.get("autoSpent"),
+      chrome.storage.local.get("autoLimit")
+    ]);
+    budget.restore(session.autoSpent ?? 0);
+    budget.setLimit(local.autoLimit ?? DEFAULT_LIMIT);
+  })();
+  return budgetReady;
+}
+
+function persistBudget() {
+  void chrome.storage.session.set({ autoSpent: budget.spent }).catch(() => {});
+}
+
 // --- settings --------------------------------------------------------------
 
 async function loadSettings() {
@@ -435,14 +469,37 @@ async function translate(ctx) {
     };
   }
 
-  const translated = await translatePage({
-    imageB64: prepared.numbered,
-    regionCount: prepared.regions.length,
-    seriesId,
-    apiKey: settings.apiKey,
-    model: settings.model,
-    reasoningEffort: settings.reasoningEffort
-  });
+  // THE ONLY LINE THAT SPENDS MONEY IS BELOW THIS ONE. Everything up to here --
+  // retrieval, hashing, the cache lookup, detection -- is free, so the ceiling
+  // is checked as late as possible and a cached page never touches it.
+  if (ctx.auto) {
+    await ensureBudget();
+    if (!budget.reserve()) {
+      throw new BudgetExceededError(
+        `Auto-translate has reached its ceiling of ${budget.limit} paid ` +
+        `page(s) for this browser session. Raise it in options (it takes ` +
+        `effect immediately), or restart the browser to reset the count. ` +
+        `Pages already translated stay free to re-read.`);
+    }
+    persistBudget();
+  }
+
+  let translated;
+  try {
+    translated = await translatePage({
+      imageB64: prepared.numbered,
+      regionCount: prepared.regions.length,
+      seriesId,
+      apiKey: settings.apiKey,
+      model: settings.model,
+      reasoningEffort: settings.reasoningEffort
+    });
+  } catch (err) {
+    // A call that never produced anything should not be charged against the
+    // ceiling -- otherwise a flaky network quietly eats the session's budget.
+    if (ctx.auto) { budget.release(); persistBudget(); }
+    throw err;
+  }
 
   const page = {
     contentHash: hash,
@@ -463,6 +520,7 @@ async function translate(ctx) {
 
   return {
     page, strategy, tried, cached: false,
+    budget: ctx.auto ? { spent: budget.spent, limit: budget.limit } : undefined,
     backend: prepared.backend,
     backendWarning: prepared.backendWarning,
     marks: prepared.marks,
@@ -490,12 +548,33 @@ chrome.action.onClicked.addListener(async (tab) => {
   });
 });
 
+// Without this, changing the ceiling in options does nothing until the worker
+// happens to be recycled -- which looks like the setting being ignored.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.autoLimit) {
+    budget.setLimit(changes.autoLimit.newValue ?? DEFAULT_LIMIT);
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "YOMI_BUDGET") {
+    ensureBudget().then(() =>
+      sendResponse({ ok: true, spent: budget.spent, limit: budget.limit }));
+    return true;
+  }
+
   if (msg?.type !== "YOMI_TRANSLATE") return;
 
   translate({ ...msg, tabId: sender.tab?.id })
     .then((result) => sendResponse({ ok: true, ...result }))
-    .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+    .catch((err) => sendResponse({
+      ok: false,
+      error: String(err?.message ?? err),
+      // Flagged rather than pattern-matched on the message: the content script
+      // has to stop asking entirely when the ceiling is reached, and inferring
+      // that from error text would break the moment the wording changed.
+      budgetExceeded: err instanceof BudgetExceededError
+    }));
 
   return true;   // keeps the channel open for the async reply
 });
