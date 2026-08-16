@@ -62,9 +62,10 @@
     });
   }
 
-  // The detector returns the TEXT region, not the bubble. Bubbles are larger
-  // than the text they contain, so we can spend a little of that margin to give
-  // English more room. Too much and boxes collide with neighbouring art.
+  // Fallback expansion only. Boxes normally arrive already shaped by
+  // lib/layout.js, which knows the pixels and can widen a vertical region as
+  // far as its bubble actually goes; this is what a region falls back to if it
+  // arrives without one.
   const BOX_EXPAND = 0.08;
 
   const CSS = `
@@ -77,10 +78,12 @@
       align-items: center;
       justify-content: center;
       box-sizing: border-box;
-      /* Visible, not hidden: the legibility floor in layout() lets a box that
-         cannot fit its text at the minimum size overflow rather than shrink
-         into unreadability, and clipping would defeat that. */
-      overflow: visible;
+      /* Nothing leaves the box. The box is the region of the page we have
+         measured and are entitled to paint on; text spilling out of it lands
+         on artwork or on a neighbour's bubble, which is the mess this is
+         meant to replace. A region that cannot fit its text at MIN_PX is
+         reported rather than allowed to bleed -- see layout(). */
+      overflow: hidden;
       text-align: center;
       font-family: "Yomi Letter", "CC Wild Words", "Wild Words", "Anime Ace",
                    "Comic Neue", "Comic Sans MS", system-ui, sans-serif;
@@ -92,6 +95,12 @@
       letter-spacing: 0.005em;
       hyphens: auto;
       overflow-wrap: break-word;
+      /* Greedy wrapping fills each line to the brim and leaves the last one
+         holding a single word -- the other half of the machine-made look, and
+         the half that survives however well the box is shaped. Balancing evens
+         the line lengths instead, which is what a letterer does by hand. It is
+         the shape of the ragged edge people read as hand-set. */
+      text-wrap: balance;
       pointer-events: auto;
       cursor: default;
     }
@@ -104,55 +113,78 @@
        old white assumption, used only if a region arrives unmeasured. */
     .region {
       --fill: #fff;
-      --ink: #111;
+      --ink: #000;
       --halo: #fff;
     }
 
-    /* The seamless trick: the fill MATCHES the surface underneath, so a fill
-       that is opaque in the middle and fades to transparent before the edge is
-       invisible against it. No hard rectangle edge, no need to match the
-       bubble's exact outline -- which we cannot know anyway. This is what makes
-       a measured colour so much more forgiving than a white one: on a grey
-       gradient panel a white box is a hole, a grey one is seamless. */
-    .region.bubble, .region.thought {
-      background: radial-gradient(ellipse at center,
-                  var(--fill) 0%, var(--fill) 72%, transparent 100%);
+    /* THE FILL COVERS THE WHOLE BOX. Every edge of that box was probed in
+       lib/layout.js and found to be the same surface the region sits on, so
+       there is nothing at the rim for a fill to damage and no reason to stop
+       short of it. The old rule faded out at 72% of an ellipse, which left the
+       Japanese showing around the edges of the very region it was covering.
+       RIM is all that is left of the fade: enough to kill the aliasing where
+       the fill meets a bubble's own outline, and to keep a solid patch from
+       banding against a surface that is subtly graded. Nothing extends past
+       the box.
+
+       Masked on both axes rather than drawn as one radial gradient, because
+       the shape has to come from the geometry and not from the region kind: a
+       rectangular grey narration panel that the model tagged "thought" used to
+       get an ellipse, and lost its corners.
+
+       The fill is a pseudo-element rather than the region's own background,
+       because a mask applies to everything the element paints -- the text
+       included. Masking the region itself feathers the glyphs nearest the edge
+       and makes the lettering look like it is dissolving into the bubble. */
+    .region.filled {
+      /* Hard-edged unless the region says otherwise. A soft edge is a
+         translucent one, and translucency belongs only over margin we won --
+         never over the Japanese being covered. */
+      --rim-l: 0%;
+      --rim-r: 0%;
+      --rim-t: 0%;
+      --rim-b: 0%;
       color: var(--ink);
-      padding: 4%;
+      /* In em, not %. Percentage padding resolves against the box's WIDTH on
+         every side, so a wide short box lost ~30% of its height to top and
+         bottom padding and had to set its text smaller to compensate. In em it
+         tracks the lettering instead, which is what the inset is actually for. */
+      padding: 0.1em 0.3em;
     }
 
-    /* Narration boxes are rectangular and usually sit flush to a border, so
-       fade on the long axis only. */
-    .region.narration {
-      background: linear-gradient(to bottom,
-                  transparent 0%, var(--fill) 6%, var(--fill) 94%, transparent 100%);
-      color: var(--ink);
-      padding: 3%;
+    .region.filled::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      background: var(--fill);
+      mask-image:
+        linear-gradient(to bottom, transparent 0, #000 var(--rim-t),
+                        #000 calc(100% - var(--rim-b)), transparent 100%),
+        linear-gradient(to right, transparent 0, #000 var(--rim-l),
+                        #000 calc(100% - var(--rim-r)), transparent 100%);
+      mask-composite: intersect;
     }
 
-    /* SFX ALWAYS outlines, however uniform its pixels turn out to be. It is
-       short, it sits on artwork by nature, and filling behind it destroys the
-       panel for no readability gain. */
-    .region.sfx {
-      background: none !important;
-      color: var(--ink);
-      -webkit-text-stroke: 0.09em var(--halo);
-      paint-order: stroke fill;
-      letter-spacing: 0.02em;
-      padding: 0;
-    }
-
-    /* Measured as too varied to be a surface -- text sitting on artwork rather
-       than inside a bubble. Any fill here punches a hole in the panel, so draw
-       outlined text and let the art show through. Ink and halo come from the
-       measured luminance, so this works on a dark panel too. Overrides the kind
-       rules above. */
-    .region.busy {
-      background: none !important;
+    /* The other branch, and mutually exclusive with .filled: either the pixels
+       measured as too varied to be a surface -- text on artwork, where any fill
+       punches a hole in the panel -- or an SFX, which always outlines however
+       uniform it measured, because it is short and filling behind it destroys
+       the panel for no readability gain. Ink and halo come from the measured
+       luminance, so both work on a dark panel too. */
+    .region.outlined {
+      background: none;
       color: var(--ink);
       -webkit-text-stroke: 0.14em var(--halo);
       paint-order: stroke fill;
       padding: 0;
+    }
+
+    /* SFX keeps a lighter stroke and its tracking, so it still reads as SFX
+       rather than as narration that happened to land on artwork. */
+    .region.sfx {
+      -webkit-text-stroke: 0.09em var(--halo);
+      letter-spacing: 0.02em;
     }
 
     /* Anything the model dropped renders as the original Japanese, dimmed, so a
@@ -161,6 +193,7 @@
       color: #666;
       font-style: italic;
     }
+
 
     .region:hover::after {
       content: attr(data-jp);
@@ -226,23 +259,33 @@
   /**
    * Layout in two passes.
    *
-   * Pass 1 finds the largest size each box could take on its own. Fitting each
-   * box independently is what makes an amateur page look amateur: a two-word
-   * bubble renders huge next to a dense one, and the eye reads the variation as
-   * sloppiness even when every box is legible on its own.
+   * Pass 1 finds the largest size each box could take on its own.
    *
-   * Pass 2 picks one size for the page -- a low percentile of the individual
-   * maxima -- and applies it everywhere, letting only genuinely tight boxes
-   * drop below it. Real lettering works the same way.
+   * Pass 2 USED TO pick one size for the whole page -- the 35th percentile of
+   * those maxima -- on the theory that uniform lettering looks professional.
+   * That theory is wrong, and it is why the type came out small: sizing every
+   * box near the tightest one on the page throws away the room in all the
+   * others, and two thirds of the page renders smaller than it could.
    *
-   * THE FLOOR. Left alone, pass 2 will happily drive every box down to whatever
-   * the tightest one allows. Text at 6px covers the Japanese AND cannot be
-   * read, which is strictly worse than rendering nothing at all. So nothing
-   * renders below MIN_PX; a box that cannot fit its text at that size overflows
-   * instead (hence overflow: visible on .region). Overflow is recoverable by
-   * eye. Unreadable text is not.
+   * Look at what published scans actually do and the size plainly tracks the
+   * bubble -- a big bubble gets big lettering, "THANKS~" in a small one gets
+   * small lettering, on the same page. So the page percentile is a CAP on the
+   * outliers, not a target: a box uses its own maximum, and only the largest
+   * few are pulled back so a two-word bubble does not shout.
+   *
+   * THE FLOOR IS SOFT, and it has to be. Left alone, pass 2 drives every box
+   * down to whatever the tightest one allows, and text at 6px covers the
+   * Japanese while being unreadable itself. So MIN_PX pulls the uniform size
+   * back up.
+   *
+   * What it must never do is set a size the box cannot hold. A hard floor did
+   * exactly that: boxes were given 11px whether or not 11px fitted, words then
+   * ran past the edges, and with nothing allowed out of the box they were cut
+   * off mid-word -- text visibly fighting the box it sits in. The floor now
+   * raises the UNIFORM size only, and never past what the box measured as
+   * able to hold. A box too small for MIN_PX renders small rather than clipped.
    */
-  const UNIFORM_PERCENTILE = 0.35;
+  const CAP_PERCENTILE = 0.8;
   const MIN_PX = 11;
 
   function layout(host, layer, img) {
@@ -260,11 +303,27 @@
 
     if (maxima.length === 0) return;
     const sorted = [...maxima].sort((a, b) => a - b);
-    const target = sorted[Math.floor(sorted.length * UNIFORM_PERCENTILE)];
+    const cap = sorted[Math.min(sorted.length - 1,
+                                Math.floor(sorted.length * CAP_PERCENTILE))];
 
+    const clipped = [];
     els.forEach((el, i) => {
-      el.style.fontSize = `${Math.max(MIN_PX, Math.min(maxima[i], target))}px`;
+      // min() last: whatever the floor and the cap want, the size the box
+      // measured as able to hold wins. Setting a size a box cannot hold is what
+      // made words run past the edges and get cut off mid-word.
+      el.style.fontSize = `${Math.min(maxima[i], Math.max(MIN_PX, cap))}px`;
+      const over = el.scrollHeight > el.clientHeight + 1 ||
+                   el.scrollWidth > el.clientWidth + 1;
+      if (over) clipped.push(el.textContent.slice(0, 30));
     });
+
+    // Reported, not drawn on the page. An outline around the offenders was a
+    // useful debugging aid and a visible defect in the thing being debugged.
+    if (clipped.length) {
+      console.warn(
+        `[yomi] ${clipped.length}/${els.length} region(s) too small even for ` +
+        `their fitted size:`, clipped);
+    }
   }
 
   window.__yomiRender = function renderOverlay(img, page) {
@@ -290,7 +349,10 @@
       const el = document.createElement("div");
       const untranslated = !region.english;
       // Busyness is measured from the pixels underneath, not inferred from kind.
-      const surface = region.busy ? " busy" : "";
+      // SFX always outlines however uniform it measured -- it is short, it sits
+      // on artwork by nature, and filling behind it destroys the panel.
+      const surface = (region.busy || region.kind === "sfx")
+        ? " outlined" : " filled";
       el.className =
         `region ${region.kind}${surface}${untranslated ? " untranslated" : ""}`;
 
@@ -299,14 +361,31 @@
       if (region.fill) {
         el.style.setProperty("--fill", `rgb(${region.fill.join(",")})`);
       }
+      // Soften the fill's edge only across margin the box actually won. A
+      // region the probe could not grow gets a hard edge and full coverage.
+      if (region.rim) {
+        for (const side of ["l", "r", "t", "b"]) {
+          el.style.setProperty(`--rim-${side}`, `${region.rim[side] * 100}%`);
+        }
+      }
+      // Stark, like the scans this imitates -- they letter in pure black on
+      // pure white, and a near-black on a near-white reads as washed out next
+      // to the artwork's own solid blacks.
       if (region.darkBg !== undefined) {
-        el.style.setProperty("--ink", region.darkBg ? "#f4f4f4" : "#111");
+        el.style.setProperty("--ink", region.darkBg ? "#fff" : "#000");
         el.style.setProperty("--halo", region.darkBg ? "#000" : "#fff");
       }
 
+      // REQUIRED for hyphens: auto to do anything. Hyphenation is per-language
+      // and the browser will not guess: inside a shadow root on a Japanese
+      // reader these inherit lang="ja" or nothing at all, and the rule silently
+      // does nothing. Official scans hyphenate constantly -- REMEM-BER,
+      // DI-VORCED, EL-EMENTARY -- because it is the only way long words fit a
+      // narrow bubble without shrinking the whole page's lettering.
+      el.lang = untranslated ? "ja" : "en";
       el.textContent = untranslated ? region.japanese : region.english;
       el.dataset.jp = region.japanese;
-      el.dataset.bounds = JSON.stringify(boundsOf(region.polygon));
+      el.dataset.bounds = JSON.stringify(region.box ?? boundsOf(region.polygon));
       layer.appendChild(el);
     }
 

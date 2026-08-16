@@ -26,7 +26,8 @@ import { bytesToBase64 } from "./lib/bytes.js";
 import { contentHash, get as cacheGet, set as cacheSet } from "./lib/cache.js";
 import { translatePage, mergeRegions, cacheKey, DEFAULTS } from "./lib/translate.js";
 import { deriveSeriesId } from "./lib/series.js";
-import { measureBackground } from "./lib/surface.js";
+import { measureBackground, stripStats, snapFill } from "./lib/surface.js";
+import { shapeBox } from "./lib/layout.js";
 
 // A RANGE, not a single id.
 //
@@ -253,14 +254,19 @@ async function preparePage(buffer, mimeType) {
 const BUSY_STD = 0.10;      // luminance sd above which a region is artwork
 const MIN_SHARE = 0.5;      // bg share below which the split found no surface
 const DARK_BG = 0.5;        // bg luminance below which text flips to light ink
+const RIM_MAX = 0.05;       // most of the fill's edge that may be soft
+
+/** Margin fraction available for a soft edge, capped at RIM_MAX. */
+const rimFraction = (v) => Math.max(0, Math.min(RIM_MAX, v));
 
 /**
- * Attach fill colour, background luminance and busyness to every region.
+ * Attach fill colour, background luminance, busyness and a layout box to every
+ * region.
  *
  * Run on every page including cache hits, not stored as a property of the
- * translation: it is a rendering decision measured from bytes we already hold,
- * so tuning a threshold should take effect immediately rather than needing the
- * cache thrown away.
+ * translation: these are rendering decisions measured from bytes we already
+ * hold, so tuning a threshold should take effect immediately rather than
+ * needing the cache thrown away.
  */
 async function annotateBackgrounds(buffer, page) {
   // Fall back to the old assumption -- a white bubble with dark text -- only if
@@ -282,24 +288,77 @@ async function annotateBackgrounds(buffer, page) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0);
 
-  for (const r of page.regions) {
+  // Pixel boxes for every region first: shaping one needs to know where the
+  // others are.
+  const boxes = page.regions.map((r) => {
     const xs = r.polygon.map((p) => p[0]);
     const ys = r.polygon.map((p) => p[1]);
-    const x0 = Math.max(0, Math.floor(Math.min(...xs) * bmp.width));
-    const x1 = Math.min(bmp.width, Math.ceil(Math.max(...xs) * bmp.width));
-    const y0 = Math.max(0, Math.floor(Math.min(...ys) * bmp.height));
-    const y1 = Math.min(bmp.height, Math.ceil(Math.max(...ys) * bmp.height));
-    const w = x1 - x0, h = y1 - y0;
+    return {
+      x0: Math.max(0, Math.floor(Math.min(...xs) * bmp.width)),
+      x1: Math.min(bmp.width, Math.ceil(Math.max(...xs) * bmp.width)),
+      y0: Math.max(0, Math.floor(Math.min(...ys) * bmp.height)),
+      y1: Math.min(bmp.height, Math.ceil(Math.max(...ys) * bmp.height))
+    };
+  });
 
-    if (w < 2 || h < 2) { Object.assign(r, UNKNOWN); continue; }
+  const probe = (x, y, w, h) =>
+    (w >= 1 && h >= 1 && x >= 0 && y >= 0 && x + w <= bmp.width && y + h <= bmp.height)
+      ? stripStats(ctx.getImageData(x, y, Math.round(w), Math.round(h)).data)
+      : null;
 
-    const measured = measureBackground(ctx.getImageData(x0, y0, w, h).data);
+  page.regions.forEach((r, i) => {
+    const box = boxes[i];
+    const w = box.x1 - box.x0, h = box.y1 - box.y0;
+
+    if (w < 2 || h < 2) { Object.assign(r, UNKNOWN); return; }
+
+    const measured = measureBackground(ctx.getImageData(box.x0, box.y0, w, h).data);
     Object.assign(r, measured ?? UNKNOWN);
+    // A near-white bubble is filled with stark white, not with its average.
+    r.fill = snapFill(r.fill);
     // No single surface to fill with: this is artwork, and painting over it
     // would cost more than the readability it buys. Outlined text instead.
     r.busy = r.bgStd > BUSY_STD || r.bgShare < MIN_SHARE;
     r.darkBg = r.bgLum < DARK_BG;
-  }
+
+    // Vertical Japanese leaves a box English cannot be set in. Widen it as far
+    // as the pixels allow -- see lib/layout.js.
+    const shaped = shapeBox(box, {
+      vertical: r.vertical,
+      base: r,
+      neighbours: boxes,
+      imageW: bmp.width,
+      imageH: bmp.height,
+      probe
+    });
+    r.box = {
+      x: shaped.x0 / bmp.width,
+      y: shaped.y0 / bmp.height,
+      w: (shaped.x1 - shaped.x0) / bmp.width,
+      h: (shaped.y1 - shaped.y0) / bmp.height
+    };
+    r.widenedBy = +((shaped.x1 - shaped.x0) / w).toFixed(2);
+
+    // How much of the box is MARGIN -- the part we won past the detected text.
+    //
+    // The overlay softens the outermost edge of the fill, which is what makes a
+    // rectangle survive an irregular bubble. But a soft edge is a translucent
+    // one, and translucency over Japanese lets it bleed through and breaks the
+    // illusion completely. So the soft rim is allowed only as far as the margin
+    // reaches: where the box grew, it fades over empty bubble; where the probe
+    // refused to grow it, the box IS the text and the fill goes hard-edged and
+    // covers it outright.
+    // Per side, because growth is rarely symmetric: a bubble often has room on
+    // one side and its wall on the other, and taking the smaller of the two
+    // would throw away a perfectly good soft edge.
+    const sw = shaped.x1 - shaped.x0, sh = shaped.y1 - shaped.y0;
+    r.rim = {
+      l: +rimFraction((box.x0 - shaped.x0) / sw).toFixed(4),
+      r: +rimFraction((shaped.x1 - box.x1) / sw).toFixed(4),
+      t: +rimFraction((box.y0 - shaped.y0) / sh).toFixed(4),
+      b: +rimFraction((shaped.y1 - box.y1) / sh).toFixed(4)
+    };
+  });
 
   bmp.close?.();
   return page;

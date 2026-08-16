@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { measureBackground } from "../../../extension/lib/surface.js";
+import { measureBackground, snapFill } from "../../../extension/lib/surface.js";
 
 // Kept in sync with background.js by hand -- the extension ships without a
 // bundler, so there is nothing to import them from.
@@ -107,4 +107,51 @@ test("a flat region with no text at all is uniform", () => {
   assert.equal(isBusy(m), false);
   assert.equal(m.bgShare, 1);
   assert.equal(m.bgStd, 0);
+});
+
+// --- stark white ------------------------------------------------------------
+//
+// The scans this imitates letter in pure black on pure white. Matching a
+// bubble's measured average instead leaves a visibly grey patch on it, because
+// the bubble is not really 252 -- it is 255 with JPEG noise on it.
+
+test("a near-white bubble is filled with stark white, not its average", () => {
+  for (const v of [250, 252, 253, 254, 255]) {
+    assert.deepEqual(snapFill([v, v, v]), [255, 255, 255], `${v} should snap`);
+  }
+});
+
+test("a near-black surface snaps to stark black", () => {
+  assert.deepEqual(snapFill([9, 9, 9]), [0, 0, 0]);
+});
+
+test("a tinted bubble keeps its tint", () => {
+  // The neutrality guard. Cream is close to white in luminance but is a real
+  // colour, and flattening it to #fff would undo the measurement.
+  assert.deepEqual(snapFill([238, 230, 214]), [238, 230, 214]);
+});
+
+test("a grey panel keeps its grey", () => {
+  // The Task 1 case: far enough from either end that snapping never applies,
+  // which is what keeps a gradient narration panel filling with grey.
+  assert.deepEqual(snapFill([170, 170, 170]), [170, 170, 170]);
+});
+
+test("snapping does not reach a light grey that is genuinely grey", () => {
+  // 230 is light but visibly not white; pulling it to #fff would put a bright
+  // patch on the page.
+  assert.deepEqual(snapFill([230, 230, 230]), [230, 230, 230]);
+});
+
+test("the measured fill of a white bubble snaps end to end", () => {
+  const d = new Uint8ClampedArray(120 * 200 * 4);
+  for (let y = 0; y < 200; y++) {
+    for (let x = 0; x < 120; x++) {
+      const glyph = (x % 18 < 4) && (y % 13 < 9);
+      const v = glyph ? 12 : 252;          // a 252 "white" bubble
+      const i = (y * 120 + x) * 4;
+      d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+    }
+  }
+  assert.deepEqual(snapFill(measureBackground(d).fill), [255, 255, 255]);
 });

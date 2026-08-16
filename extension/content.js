@@ -135,7 +135,10 @@
           sd: r.bgStd,
           share: r.bgShare,
           busy: r.busy,
-          fill: r.fill ? `rgb(${r.fill.join(",")})` : "—"
+          fill: r.fill ? `rgb(${r.fill.join(",")})` : "—",
+          // 1 means the box could not be widened -- either it is already wide
+          // enough, or the pixels beside it are not the same surface.
+          widen: r.vertical ? r.widenedBy : "—"
         }))
       );
 

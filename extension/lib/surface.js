@@ -4,6 +4,36 @@
 /** Luminance, 0-255, from 0-255 channels. */
 const LUM = (r, g, b) => r * 0.299 + g * 0.587 + b * 0.114;
 
+/**
+ * Snap a near-neutral surface to stark white or black.
+ *
+ * Official scans letter on pure white with pure black text, and that is what
+ * this is emulating. A measured 252 is not white: against a 255 bubble it is a
+ * grey patch, and no amount of measuring precision fixes that, because the
+ * thing being matched is not really 252 either -- it is 255 with JPEG noise on
+ * it. Past a point, committing to the stark value beats getting closer to the
+ * average.
+ *
+ * The neutrality guard is what keeps this from undoing the measurement it sits
+ * on: a cream or toned bubble has a real tint across its channels and keeps it.
+ * A grey narration panel is far from either end and keeps its grey. On the
+ * fixture pages this snaps 65 of 68 regions -- every one of them measured
+ * between 250 and 254 -- and the three it does not touch are all artwork that
+ * is outlined rather than filled.
+ */
+export const SNAP_WHITE = 0.94;
+export const SNAP_BLACK = 0.06;
+const NEUTRAL_SPREAD = 12;
+
+export function snapFill(fill) {
+  const spread = Math.max(...fill) - Math.min(...fill);
+  if (spread > NEUTRAL_SPREAD) return fill;
+  const lum = LUM(fill[0], fill[1], fill[2]) / 255;
+  if (lum >= SNAP_WHITE) return [255, 255, 255];
+  if (lum <= SNAP_BLACK) return [0, 0, 0];
+  return fill;
+}
+
 /** Otsu's threshold over a 256-bin histogram: maximises between-class variance. */
 export function otsuThreshold(hist, total) {
   let sum = 0;
@@ -23,6 +53,28 @@ export function otsuThreshold(hist, total) {
 }
 
 /**
+ * Mean and spread of luminance over EVERY pixel, 0-1.
+ *
+ * Deliberately not measureBackground: the box-widening probe asks "is this
+ * strip still the surface I started on", and a strip clipping a bubble outline
+ * still has a majority of interior pixels, so a background-class measurement
+ * would call it a match and walk straight off the bubble.
+ */
+export function stripStats(data, stride = 16) {
+  let n = 0, s = 0, s2 = 0;
+  for (let i = 0; i < data.length; i += stride) {
+    const lum = LUM(data[i], data[i + 1], data[i + 2]);
+    n++; s += lum; s2 += lum * lum;
+  }
+  if (n === 0) return null;
+  const mean = s / n;
+  return {
+    lum: mean / 255,
+    sd: Math.sqrt(Math.max(0, s2 / n - mean * mean)) / 255
+  };
+}
+
+/**
  * Describe the background of one region.
  *
  * @param {Uint8ClampedArray} data RGBA for the region's bounding box.
@@ -30,10 +82,11 @@ export function otsuThreshold(hist, total) {
  *   plenty of signal and keeps this off the critical path.
  * @returns {{fill:number[], bgLum:number, bgStd:number, bgShare:number}|null}
  *   `fill` is the mean RGB of the background pixels -- what to cover the region
- *   with. `bgLum` is their mean luminance 0-1, which decides ink colour.
- *   `bgStd` is their luminance standard deviation 0-1: how far from uniform the
- *   surface is, i.e. how much of a lie any fill would be. `bgShare` is the
- *   fraction of the region they account for -- see below.
+ *   with -- the colour AT the most common background value, not the average of
+ *   all of them. `bgLum` is that value 0-1, which decides ink colour. `bgStd`
+ *   is the luminance standard deviation across the whole background class 0-1:
+ *   how far from uniform the surface is, i.e. how much of a lie any fill would
+ *   be. `bgShare` is the fraction of the region they account for -- see below.
  */
 export function measureBackground(data, stride = 16) {
   const hist = new Uint32Array(256);
@@ -46,34 +99,61 @@ export function measureBackground(data, stride = 16) {
 
   const t = otsuThreshold(hist, n);
 
-  // Second pass: colour and luminance moments for each class.
+  // Which side of the split is the background: whichever holds the bulk.
+  let below = 0;
+  for (let i = 0; i <= t; i++) below += hist[i];
+  const upper = n - below >= below;
+  const k = upper ? n - below : below;
+  if (k === 0) return null;
+
+  // THE FILL COLOUR IS THE MODE, NOT THE MEAN.
+  //
+  // Averaging the whole background class is what made every fill grey. A glyph
+  // does not end at a hard edge -- it fades out through antialiasing and JPEG
+  // ringing, and that ramp lands on the background side of any threshold. On
+  // the fixture pages the true surface is pure white (mode 253-255) on 67 of 68
+  // regions, while the class mean came out 6-9 levels darker, and below 245 on
+  // 18 of them. A 240 patch on a 255 bubble is a visible grey rectangle.
+  //
+  // So the surface is the most COMMON background value, and the fill is the
+  // average colour of just the pixels sitting at it -- which keeps the tint of
+  // a cream or toned bubble while ignoring the ramp entirely.
+  const from = upper ? t + 1 : 0;
+  const to = upper ? 255 : t;
+  let peak = from;
+  for (let i = from; i <= to; i++) if (hist[i] > hist[peak]) peak = i;
+
+  // Second pass: luminance moments over the whole class (that spread is the
+  // busyness signal, and it is meant to include the ramp), and colour over a
+  // tight band at the peak.
   //
   // Classified on the SAME truncated value the histogram was built from. Using
   // the float here instead puts every pixel whose luminance falls inside the
   // threshold's own bin on the wrong side -- and since Otsu returns the lowest
   // tying threshold, that bin is usually the text itself, which quietly dragged
   // glyph pixels into the background and turned a cream bubble into "artwork".
-  const cnt = [0, 0], sr = [0, 0], sg = [0, 0], sb = [0, 0];
-  const sl = [0, 0], sl2 = [0, 0];
+  const BAND = 6;
+  let sl = 0, sl2 = 0;
+  let bn = 0, br = 0, bg = 0, bb = 0;
   for (let i = 0; i < data.length; i += stride) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
     const lum = LUM(r, g, b);
-    const c = (lum | 0) > t ? 1 : 0;
-    cnt[c]++; sr[c] += r; sg[c] += g; sb[c] += b;
-    sl[c] += lum; sl2[c] += lum * lum;
+    const li = lum | 0;
+    if ((li > t) !== upper) continue;
+    sl += lum; sl2 += lum * lum;
+    if (li >= peak - BAND && li <= peak + BAND) { bn++; br += r; bg += g; bb += b; }
   }
 
-  // The background is whichever side of the split holds the bulk.
-  const c = cnt[1] >= cnt[0] ? 1 : 0;
-  const k = cnt[c];
-  const mean = sl[c] / k;
+  const mean = sl / k;
   // Clamped because floating-point error can make a uniform region's variance
   // very slightly negative.
-  const sd = Math.sqrt(Math.max(0, sl2[c] / k - mean * mean));
+  const sd = Math.sqrt(Math.max(0, sl2 / k - mean * mean));
 
   return {
-    fill: [Math.round(sr[c] / k), Math.round(sg[c] / k), Math.round(sb[c] / k)],
-    bgLum: +(mean / 255).toFixed(3),
+    fill: bn
+      ? [Math.round(br / bn), Math.round(bg / bn), Math.round(bb / bn)]
+      : [peak, peak, peak],
+    bgLum: +(peak / 255).toFixed(3),
     bgStd: +(sd / 255).toFixed(3),
     bgShare: +(k / n).toFixed(3)
   };
