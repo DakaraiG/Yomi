@@ -182,6 +182,7 @@ export function mergeRegions(regions, translated) {
       order: i,
       polygon: region.polygon,
       vertical: region.vertical ?? null,
+      inBubble: region.inBubble === true,
       japanese: t?.japanese ?? "",
       english: t?.english ?? "",
       kind: t?.kind ?? "bubble",

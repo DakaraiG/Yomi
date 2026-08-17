@@ -155,6 +155,11 @@ export function measureBackground(data, stride = 16) {
       : [peak, peak, peak],
     bgLum: +(peak / 255).toFixed(3),
     bgStd: +(sd / 255).toFixed(3),
-    bgShare: +(k / n).toFixed(3)
+    bgShare: +(k / n).toFixed(3),
+    // How much of the background sits AT the surface value rather than merely
+    // on that side of the split. This is the honest test for "is there one
+    // surface here": a white page reads ~0.9 whether or not there is a bubble
+    // drawn on it, while artwork has no dominant value to concentrate at.
+    bgPeak: +(bn / k).toFixed(3)
   };
 }

@@ -214,12 +214,13 @@
       }))
     );
     // The measured surface, so BUSY_STD and MIN_SHARE in background.js can be
-    // tuned against real numbers rather than guessed at. `busy` regions get
-    // outlined text and no fill; everything else is covered in `fill`.
+    // tuned against real numbers rather than guessed at. `tex` regions have no
+    // bubble, so they get a heavy halo and no fill; the rest are covered in
+    // `fill`.
     console.table(
       page.regions.map((r) => ({
         order: r.order, kind: r.kind,
-        lum: r.bgLum, sd: r.bgStd, share: r.bgShare, busy: r.busy,
+        lum: r.bgLum, sd: r.bgStd, share: r.bgShare, peak: r.bgPeak, tex: r.textured,
         fill: r.fill ? `rgb(${r.fill.join(",")})` : "—",
         widen: r.vertical ? r.widenedBy : "—"
       }))

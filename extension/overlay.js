@@ -166,18 +166,29 @@
       mask-composite: intersect;
     }
 
-    /* The other branch, and mutually exclusive with .filled: either the pixels
-       measured as too varied to be a surface -- text on artwork, where any fill
-       punches a hole in the panel -- or an SFX, which always outlines however
-       uniform it measured, because it is short and filling behind it destroys
-       the panel for no readability gain. Ink and halo come from the measured
-       luminance, so both work on a dark panel too. */
+    /* NO BACKDROP AT ALL -- just a very heavy halo.
+       Text set on a panel tone or straight onto artwork has no bubble to fill,
+       and everything tried in place of one was worse than nothing: an opaque
+       box reads as a patch stuck onto the art, and a soft radial pad is still a
+       grey smear over the drawing. What actually works is the scanlation
+       answer, which is to stop trying to replace the background and instead
+       make the lettering survive whatever is behind it.
+       The stroke separates each glyph from the art, and the stacked shadows
+       build a thick opaque cushion that follows the text's own shape. The
+       repeats are the point: each identical shadow compounds the alpha, so six
+       of them turn a blur into something solid enough to read English off.
+       Tuned by eye against real pages -- it is meant to look like too much. */
     .region.outlined {
       background: none;
       color: var(--ink);
-      -webkit-text-stroke: 0.14em var(--halo);
+      -webkit-text-stroke: 0.18em var(--halo);
       paint-order: stroke fill;
       padding: 0;
+      text-shadow:
+        0 0 0.30em var(--halo), 0 0 0.30em var(--halo),
+        0 0 0.30em var(--halo), 0 0 0.30em var(--halo),
+        0 0 0.60em var(--halo), 0 0 0.60em var(--halo),
+        0 0 0.60em var(--halo), 0 0 0.90em var(--halo);
     }
 
     /* SFX keeps a lighter stroke and its tracking, so it still reads as SFX
@@ -285,12 +296,30 @@
    * raises the UNIFORM size only, and never past what the box measured as
    * able to hold. A box too small for MIN_PX renders small rather than clipped.
    */
+
   const CAP_PERCENTILE = 0.8;
   const MIN_PX = 11;
 
   function layout(host, layer, img) {
+    const t0 = performance.now();
     const r = positionHost(host, img);
     const els = Array.from(layer.children);
+
+    // SKIP IF NOTHING MOVED. fitText binary-searches the font size, and every
+    // step reads scrollHeight straight after writing fontSize, which forces a
+    // synchronous reflow -- about six per region, and more expensive now that
+    // each reflow also does balanced wrapping and hyphenation. At 25 regions
+    // that is ~150 forced reflows, on the page's own main thread.
+    //
+    // layout() runs on render AND on every ResizeObserver and window resize
+    // callback, and readers fire those freely. If the image is the same size as
+    // last time, every size already computed is still correct.
+    if (host.__yomiFitAt &&
+        Math.abs(host.__yomiFitAt.w - r.width) < 0.5 &&
+        Math.abs(host.__yomiFitAt.h - r.height) < 0.5) {
+      return;
+    }
+    host.__yomiFitAt = { w: r.width, h: r.height };
 
     const maxima = els.map((el) => {
       const b = JSON.parse(el.dataset.bounds);
@@ -324,6 +353,13 @@
         `[yomi] ${clipped.length}/${els.length} region(s) too small even for ` +
         `their fitted size:`, clipped);
     }
+
+    // So "the overlay feels slow" can be separated from "the translation was
+    // slow". This is page-side layout only and has nothing to do with the
+    // model call.
+    console.log(
+      `[yomi] fitted ${els.length} region(s) in ` +
+      `${Math.round(performance.now() - t0)}ms`);
   }
 
   window.__yomiRender = function renderOverlay(img, page) {
@@ -351,8 +387,11 @@
       // Busyness is measured from the pixels underneath, not inferred from kind.
       // SFX always outlines however uniform it measured -- it is short, it sits
       // on artwork by nature, and filling behind it destroys the panel.
-      const surface = (region.busy || region.kind === "sfx")
-        ? " outlined" : " filled";
+      // Two surfaces, and the split is simply whether there is a real bubble.
+      // Inside one, fill it. Anywhere else -- a panel tone, bare artwork, an
+      // SFX -- paint nothing and let the halo carry the text.
+      const surface =
+        (region.textured || region.kind === "sfx") ? " outlined" : " filled";
       el.className =
         `region ${region.kind}${surface}${untranslated ? " untranslated" : ""}`;
 
@@ -468,9 +507,11 @@
     window.__yomiToggleBound = true;
     let hidden = false;
     window.addEventListener("keydown", (e) => {
-      if (e.key !== "t" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const t = e.target;
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+
+      if (e.key !== "t") return;
       hidden = !hidden;
       document.querySelectorAll(`[${HOST_ATTR}]`).forEach((n) => {
         n.style.display = hidden ? "none" : "";

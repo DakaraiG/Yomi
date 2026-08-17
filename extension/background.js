@@ -241,19 +241,29 @@ async function preparePage(buffer, mimeType) {
 // the image bytes, which we already hold here in extension origin, so nothing
 // is tainted.
 //
-// THESE TWO NUMBERS ARE THE TUNING SURFACE. Both are bracketed by synthetic
-// cases, not yet by real pages -- every region's lum/sd/share is logged to the
-// console by content.js precisely so they can be set from real values.
+// The fill decision used to hang on the SPREAD of the background (BUSY_STD)
+// and how much of the region it accounted for (MIN_SHARE). Both are gone: on
+// ynko4 the spread runs 0.06-0.134 as a continuum with no gap anywhere in it,
+// because that number is inflated by the text's own antialiasing rather than by
+// anything behind the text. It was measuring text density and being read as
+// artwork detection.
 //
-//   BUSY_STD  sits above a grey gradient panel (sd ~0.05, the case this whole
-//             change exists to fix -- it must FILL) and at continuous artwork
-//             (sd ~0.11, which must not). It is the tighter of the two.
-//   MIN_SHARE catches artwork that is uniform on both sides of the split, like
-//             hard screentone, where sd sees nothing. Deliberately low: dense
-//             bold text in a tight box reaches ~0.60, so anything nearer that
-//             starts outlining perfectly good bubbles.
-const BUSY_STD = 0.10;      // luminance sd above which a region is artwork
-const MIN_SHARE = 0.5;      // bg share below which the split found no surface
+// A REGION WITHOUT A BUBBLE STILL GETS A BACKDROP. Thought text set straight
+// onto a screentone panel has no drawn bubble to fill, and outlining it leaves
+// the reader picking English out of the Japanese underneath. Grouping now
+// merges those columns into one block (see lib/group.js), and that block is
+// treated as a bubble the artist did not draw: filled, with a colour measured
+// from what it sits on.
+//
+// The rule is simply whether a bubble was drawn. Inside one, fill it: a bubble
+// interior is a closed flat light region by construction, which is exactly what
+// the connected-component pass found it by. Anywhere else -- a panel tone, bare
+// artwork, a title on open page -- paint nothing and let the halo carry it.
+//
+// This replaced a pixel test (bgPeak against a flatness threshold) that could
+// not work in principle: text on a blank part of a page measures every bit as
+// flat as text in a bubble, so it drew white boxes on open artwork. No
+// statistic of the region's own pixels can see an outline that is not there.
 const DARK_BG = 0.5;        // bg luminance below which text flips to light ink
 const RIM_MAX = 0.05;       // most of the fill's edge that may be soft
 
@@ -261,7 +271,7 @@ const RIM_MAX = 0.05;       // most of the fill's edge that may be soft
 const rimFraction = (v) => Math.max(0, Math.min(RIM_MAX, v));
 
 /**
- * Attach fill colour, background luminance, busyness and a layout box to every
+ * Attach fill colour, background luminance, texture and a layout box to every
  * region.
  *
  * Run on every page including cache hits, not stored as a property of the
@@ -273,8 +283,8 @@ async function annotateBackgrounds(buffer, page) {
   // Fall back to the old assumption -- a white bubble with dark text -- only if
   // the pixels are genuinely unavailable.
   const UNKNOWN = {
-    fill: [255, 255, 255], bgLum: 1, bgStd: 0, bgShare: 1,
-    busy: false, darkBg: false
+    fill: [255, 255, 255], bgLum: 1, bgStd: 0, bgShare: 1, bgPeak: 1,
+    textured: false, darkBg: false
   };
 
   let bmp;
@@ -315,12 +325,21 @@ async function annotateBackgrounds(buffer, page) {
 
     const measured = measureBackground(ctx.getImageData(box.x0, box.y0, w, h).data);
     Object.assign(r, measured ?? UNKNOWN);
-    // A near-white bubble is filled with stark white, not with its average.
+
+    // NO DRAWN BUBBLE MEANS NO BOX. bgPeak cannot settle this on its own: text
+    // on a blank part of a page measures just as flat as text in a bubble, so
+    // the pixels alone would put a white rectangle on open artwork. The
+    // enclosure test from grouping is the authority; bgPeak only decides
+    // whether an actual bubble's interior is flat enough to fill starkly.
+    r.textured = !r.inBubble;
+    // Stark white beats a measured 252, which reads as a grey patch on a white
+    // bubble. Still computed for outlined regions, because it is what decides
+    // the ink and halo colours.
     r.fill = snapFill(r.fill);
-    // No single surface to fill with: this is artwork, and painting over it
-    // would cost more than the readability it buys. Outlined text instead.
-    r.busy = r.bgStd > BUSY_STD || r.bgShare < MIN_SHARE;
-    r.darkBg = r.bgLum < DARK_BG;
+    // Ink follows what we are about to paint, not what was measured -- on a
+    // textured region those differ by a lot.
+    r.darkBg = (r.fill[0] * 0.299 + r.fill[1] * 0.587 + r.fill[2] * 0.114) / 255
+               < DARK_BG;
 
     // Vertical Japanese leaves a box English cannot be set in. Widen it as far
     // as the pixels allow -- see lib/layout.js.

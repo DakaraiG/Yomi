@@ -126,7 +126,10 @@ async function prepare({ imageB64, mimeType }) {
         [b.x1 / raster.width, b.y1 / raster.height],
         [b.x0 / raster.width, b.y1 / raster.height]
       ],
-      vertical: (b.y1 - b.y0) > (b.x1 - b.x0)
+      vertical: (b.y1 - b.y0) > (b.x1 - b.x0),
+      // Whether a bubble was actually drawn around this text. The overlay only
+      // paints a box when there is one.
+      inBubble: b.inBubble === true
     }))
   };
 }

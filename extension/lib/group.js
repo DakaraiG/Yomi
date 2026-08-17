@@ -174,10 +174,24 @@ function enclosingBubble({ labels, width, height }, box) {
   let best = 0, bestCount = 0;
   for (const [id, n] of counts) if (n > bestCount) { best = id; bestCount = n; }
 
-  // Require the winner to actually dominate. A line that merely brushes a
-  // neighbouring bubble picks up a few of its pixels, and inheriting that
-  // bubble's identity would merge it into the wrong block.
-  return sampled && bestCount / sampled >= 0.25 ? best : 0;
+  // Require the winner to actually ENCLOSE the line, not merely touch it.
+  //
+  // Measured over 222 detected lines across the four fixture pages, this is
+  // sharply bimodal: text genuinely inside a bubble scores 0.6-0.9 (172 lines,
+  // peaking at 0.7-0.8), while on-art text scores 0.0-0.5 (42 lines), with a
+  // near-empty valley between. The threshold belongs in that valley.
+  //
+  // It used to be 0.25, which is deep inside the noise, and the cost was not a
+  // few odd groupings -- it was structural. A screentone panel breaks into a
+  // scatter of small light blobs, and at 0.25 each column of thought text
+  // claimed a different blob as its "bubble". Bucketing happens by bubble id
+  // BEFORE any geometry is considered, so those columns could never merge no
+  // matter how plainly adjacent they were: on ynko4's grey band, eleven of the
+  // fourteen neighbouring pairs pass the adjacency test and none of them were
+  // ever asked. Text with no bubble has to fall through to geometry, and that
+  // only happens when it reports no bubble.
+  const ENCLOSURE = 0.55;
+  return sampled && bestCount / sampled >= ENCLOSURE ? best : 0;
 }
 
 function union(a, b) {
@@ -243,8 +257,8 @@ function mergeByAdjacency(boxes, indices, gapRatio = ADJACENT_GAP_RATIO) {
 /**
  * @param {{width:number,height:number,data:Uint8ClampedArray}} raster
  * @param {Array<{x0:number,y0:number,x1:number,y1:number,score?:number}>} lines
- * @returns {Array<{x0,y0,x1,y1,score,members:number[]}>} blocks, unordered --
- *   run panelReadingOrder over the result to sort them.
+ * @returns {Array<{x0,y0,x1,y1,score,members:number[],inBubble:boolean}>}
+ *   blocks, unordered -- run panelReadingOrder over the result to sort them.
  */
 export function groupIntoBlocks(raster, lines) {
   if (!lines.length) return [];
@@ -307,7 +321,14 @@ export function groupIntoBlocks(raster, lines) {
     // columns of an ordinary bubble, whose spacing is about one character.
     const gapRatio = bubble !== 0 ? BUBBLE_GAP_RATIO : ADJACENT_GAP_RATIO;
     for (const group of mergeByAdjacency(lines, indices, gapRatio)) {
-      blocks.push({ ...group.box, members: group.members });
+      // Carried out with the block, not just used for bucketing. Whether a
+      // region sits inside a drawn bubble is the one thing that decides
+      // whether the overlay may paint a box, and it cannot be recovered
+      // downstream: text on a blank area of a page is pixel-for-pixel
+      // indistinguishable from text in a bubble, because both are uniformly
+      // light. Only the connected-component pass knows there is no outline
+      // around it.
+      blocks.push({ ...group.box, members: group.members, inBubble: bubble !== 0 });
     }
   }
 
