@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 
 import { loadRaster } from "./lib/image.mjs";
 import { drawNumberedBoxes, HANDOFF } from "./lib/render.mjs";
-import { paddleCandidate } from "./candidates/paddle-db.mjs";
+import { ctdCandidate } from "./candidates/ctd.mjs";
 import { buildRegions } from "./handoff.mjs";
 import { translatePage, cacheKey, DEFAULTS } from "../../extension/lib/translate.js";
 import { SYSTEM, buildUserText } from "../../extension/lib/prompt.js";
@@ -105,7 +105,7 @@ async function main() {
   const seriesId = arg("series", "ynko");
 
   const raster = await loadRaster(join(FIXTURES, "pages", page));
-  const detector = paddleCandidate({ maxSide: 1536 });
+  const detector = ctdCandidate({ label: "ctd-fused" });
   await detector.init();
 
   const regions = await buildRegions(raster, detector);

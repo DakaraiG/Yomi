@@ -1,29 +1,46 @@
-// Text detection: PaddleOCR DB head, ONNX Runtime Web, WASM backend.
+// Text detection: comic-text-detector, ONNX Runtime Web, WebGPU or WASM.
 //
-// Chosen in the Phase 1 bake-off. Apache-2.0, 4.7MB, 92.3% recall against
-// comic-text-detector across the fixture pages at ~250ms a page -- the best of
-// seven candidates and, usefully, also the smallest of the learned ones. The
-// numbers and the runners-up are in tools/bakeoff/README.md.
+// REPLACED PaddleOCR, which won the Phase 1 bake-off on boxes alone. The
+// question changed: the overlay stopped covering the Japanese and started
+// erasing it, and erasing needs a per-pixel glyph mask that DB cannot give --
+// its probability map is region-level by construction, which is why unclip()
+// exists. CTD carries a UNet segmentation head next to its detection heads,
+// so one forward pass yields boxes and mask together.
+//
+// Measured on the fixture pages (tools/bakeoff, `--only ctd-fused,paddle-1536`):
+//
+//                 recall   exact grouping   ms
+//   paddle-1536    92.3%   87.5/92.3/86.4   260
+//   ctd-fused     100.0%   94.1/92.9/86.4   862
+//
+// Recall against fixtures/baseline.json is partly circular -- the baseline is
+// this model's own output from the v0.3 sidecar -- so read 100% as "the port is
+// faithful". The grouping columns are the honest comparison, and they are level
+// or better. The 600ms costs nothing next to a 12-18s translate call.
+//
+// GPL-3.0, which is the licence the v0.4 rewrite existed to get out of. It is
+// back deliberately and narrowly: weights are fetched at install time and no
+// GPL code is linked, so the three-process wall does not come back. See
+// README.md and tools/bakeoff/fetch-models.mjs.
 //
 // Model signature, confirmed against the file rather than assumed:
-//   in   x                NCHW float32, all spatial dims dynamic
-//   out  sigmoid_0.tmp_0  N,1,H,W float32 -- already through a sigmoid, so the
-//                         output is a probability map, not logits
+//   in   images   [1,3,1024,1024] float32, RGB, 0-1, letterboxed, pad 114
+//   out  blk      [1,64512,7]     YOLOv5 detections, anchor-decoded
+//   out  seg      [1,1,1024,1024] per-pixel text mask
+//   out  det      [1,2,1024,1024] DBNet-style line head, channel 0 = probability
 //
-// maxSide is the parameter that matters and 1536 is not arbitrary. PaddleOCR's
-// own default caps the long edge at 960px, tuned for photographs of signs; a
-// manga page is 2000-3000px of small vertical kana and 960 shrinks a glyph
-// below what the model can resolve. Above 1536 it gets worse again -- DB has a
-// sweet spot relative to text size and past it strokes fragment. Measured:
-// 960 -> 91.9%, 1536 -> 92.3%, 2048 -> 85.7%.
+// THE INPUT DIMS ARE STATIC. There is no maxSide here and nothing to sweep:
+// every page is squashed to 1024 on its long edge, on every backend. That
+// removes the tuning that mattered most on the DB path and removes the CPU
+// path's only lever with it -- see init().
 
-import { resizeRGBA, toTensor, padTo } from "./imageops.js";
+import { toTensor } from "./imageops.js";
 import { probabilityMapToBoxes } from "./db-postprocess.js";
+import {
+  CTD_SIZE, letterbox, decodeBlocks, cropChannel, resizeMap, fuse
+} from "./ctd-postprocess.js";
 
-const MEAN = [0.485, 0.456, 0.406];
-const STD = [0.229, 0.224, 0.225];
-
-export const MODEL_PATH = "models/ch_PP-OCRv4_det_infer.onnx";
+export const MODEL_PATH = "models/comictextdetector.pt.onnx";
 
 export class Detector {
   #session = null;
@@ -31,16 +48,15 @@ export class Detector {
 
   /**
    * @param {object} [opts]
-   * @param {number} [opts.maxSide=1536]     long edge on WebGPU
-   * @param {number} [opts.cpuMaxSide=960]   long edge on the CPU fallback
+   * @param {number} [opts.confThreshold=0.4]    YOLO objectness x class score
+   * @param {number} [opts.nmsThreshold=0.35]    IoU above which blocks merge
+   * @param {number} [opts.binaryThreshold=0.3]  det map -> line mask
    */
-  constructor({ maxSide = 1536, cpuMaxSide = 960, binaryThreshold = 0.3,
+  constructor({ confThreshold = 0.4, nmsThreshold = 0.35, binaryThreshold = 0.3,
                 boxThreshold = 0.5, unclipRatio = 1.8 } = {}) {
-    this.options = { maxSide, binaryThreshold, boxThreshold, unclipRatio };
-    // Resolution is the only lever that works on the CPU path, and it is a
-    // cheap one: 960 measured 91.9% recall against 1536's 92.3%, for ~2.5x
-    // fewer pixels. Losing 0.4 points of recall beats a page taking a minute.
-    this.cpuMaxSide = cpuMaxSide;
+    this.options = {
+      confThreshold, nmsThreshold, binaryThreshold, boxThreshold, unclipRatio
+    };
     /** Which execution provider actually loaded: "webgpu" or "wasm". */
     this.backend = null;
   }
@@ -95,8 +111,7 @@ export class Detector {
           graphOptimizationLevel: "all"
         });
         this.backend = "webgpu";
-        console.info(
-          `[yomi] detector ready on webgpu, maxSide ${this.options.maxSide}`);
+        console.info(`[yomi] detector ready on webgpu, ${CTD_SIZE}px input`);
         return;
       } catch (err) {
         this.initWarning = `WebGPU failed, using CPU: ${err.message}`;
@@ -114,16 +129,19 @@ export class Detector {
     });
     this.backend = "wasm";
 
-    // Single-threaded CPU cannot carry 1536. Drop the working resolution rather
-    // than let a page take a minute -- see cpuMaxSide.
-    this.options.maxSide = this.cpuMaxSide;
+    // THE CPU PATH LOST ITS ESCAPE HATCH with the move off PaddleOCR. That
+    // path used to drop the working resolution to 960 and take the 0.4 points
+    // of recall it cost; this model's input dims are static, so a page on
+    // single-threaded WASM is a full 1024x1024 pass through a UNet and there is
+    // no smaller version of it to run. Expect tens of seconds. The warning says
+    // "slow" rather than "reduced resolution" because that is now the truth.
     if (!this.initWarning) {
       this.initWarning = navigator.gpu
-        ? "WebGPU present but no adapter — running on CPU at reduced resolution"
-        : "No WebGPU in this browser — running on CPU at reduced resolution";
+        ? "WebGPU present but no adapter — running on CPU, expect a slow page"
+        : "No WebGPU in this browser — running on CPU, expect a slow page";
     }
     console.info(
-      `[yomi] detector ready on ${this.backend}, maxSide ${this.options.maxSide}`);
+      `[yomi] detector ready on ${this.backend}, ${CTD_SIZE}px input`);
   }
 
   /**
@@ -135,20 +153,18 @@ export class Detector {
    * page is as fast as their tenth, and it turns "the extension hangs" into "the
    * extension takes a moment to start", which is a far better failure to have.
    *
-   * Shape must MATCH what detect() will produce or the shaders are compiled for
-   * nothing; see the padTo() call there.
+   * Shape is fixed by the model, so unlike the DB path there is no way for the
+   * warm-up shape to disagree with the one real pages use.
    */
-  async warmUp(width = 1125, height = 1600) {
+  async warmUp() {
     if (!this.#session) return;
-    const ratio = Math.min(1, this.options.maxSide / Math.max(width, height));
-    const inW = padTo(Math.round(width * ratio), 32);
-    const inH = padTo(Math.round(height * ratio), 32);
 
-    const label = `[yomi] warm-up ${inW}x${inH} on ${this.backend}`;
+    const label = `[yomi] warm-up ${CTD_SIZE}x${CTD_SIZE} on ${this.backend}`;
     console.time(label);
     try {
       const tensor = new this.#ort.Tensor(
-        "float32", new Float32Array(3 * inW * inH), [1, 3, inH, inW]);
+        "float32", new Float32Array(3 * CTD_SIZE * CTD_SIZE),
+        [1, 3, CTD_SIZE, CTD_SIZE]);
       await this.#session.run({ [this.#session.inputNames[0]]: tensor });
     } catch (err) {
       console.warn("[yomi] warm-up failed (not fatal):", err.message);
@@ -173,47 +189,78 @@ export class Detector {
   }
 
   /**
+   * One forward pass, three answers: block boxes, line boxes, and the mask.
+   *
    * @param {{width:number,height:number,data:Uint8ClampedArray}} raster
-   * @returns {Promise<Array<{x0,y0,x1,y1,score}>>} one box per text LINE, in
-   *   original pixel coordinates. Grouping into blocks is lib/group.js's job.
+   * @returns {Promise<{lines:Array<{x0,y0,x1,y1,score}>, seg:Float32Array}>}
+   *   `lines` is one box per text LINE in original pixel coordinates, plus any
+   *   block the line head missed entirely -- grouping them is lib/group.js's
+   *   job. `seg` is the per-pixel text probability at PAGE resolution, one
+   *   float per pixel, row-major.
+   *
+   * SEG STAYS INSIDE THE OFFSCREEN DOCUMENT. A page-resolution float map is
+   * several megabytes; sending it through chrome.runtime means structured-clone
+   * copies on both sides of a message port for something only buildCleanPlate
+   * ever reads. It is returned here, consumed there, and never serialised.
    */
   async detect(raster) {
     if (!this.#session) throw new Error("Detector.init() has not been awaited");
     const { width, height } = raster;
-    const { maxSide, binaryThreshold, boxThreshold, unclipRatio } = this.options;
+    const {
+      confThreshold, nmsThreshold, binaryThreshold, boxThreshold, unclipRatio
+    } = this.options;
 
-    const ratio = Math.min(1, maxSide / Math.max(width, height));
-    const inW = padTo(Math.round(width * ratio), 32);
-    const inH = padTo(Math.round(height * ratio), 32);
-
-    const resized = resizeRGBA(raster, inW, inH);
+    const { raster: lb, r, nw, nh } = letterbox(raster);
+    // No mean/std: this model takes plain 0-1 RGB, unlike the ImageNet-
+    // normalised DB path it replaced. Normalising anyway costs nothing visible
+    // and quietly halves recall.
     const tensor = new this.#ort.Tensor(
-      "float32", toTensor(resized, { mean: MEAN, std: STD }), [1, 3, inH, inW]);
+      "float32", toTensor(lb), [1, 3, CTD_SIZE, CTD_SIZE]);
 
     // Timed out loud, because this is the one stage whose cost is invisible
     // otherwise and the one that has actually been slow. On WebGPU the FIRST
-    // run at a given input shape also compiles a compute shader per op, so a
-    // first call costing tens of seconds and later ones costing a few hundred
-    // ms is expected -- and is a completely different problem from every call
-    // being slow. The label carries the shape so the two are distinguishable.
-    const label = `[yomi] inference ${inW}x${inH} on ${this.backend}`;
+    // run compiles a compute shader per op, so a first call costing tens of
+    // seconds and later ones costing under a second is expected -- and is a
+    // completely different problem from every call being slow.
+    const label = `[yomi] inference ${CTD_SIZE}x${CTD_SIZE} on ${this.backend}`;
     console.time(label);
     const result = await this.#session.run({ [this.#session.inputNames[0]]: tensor });
-    const prob = result[this.#session.outputNames[0]].data;
     console.timeEnd(label);
 
-    return probabilityMapToBoxes(prob, {
-      width: inW,
-      height: inH,
+    const [blkName, segName, detName] = this.#session.outputNames;
+
+    // Line boxes from the DB-style head, through the same post-processing the
+    // PaddleOCR path used -- the head is the same shape of thing, so the
+    // threshold/unclip machinery ports over unchanged.
+    const lineMap = cropChannel(result[detName].data,
+      { size: CTD_SIZE, nw, nh, channel: 0 });
+    const lines = probabilityMapToBoxes(lineMap, {
+      width: nw,
+      height: nh,
       binaryThreshold,
       boxThreshold,
       unclipRatio,
-      // Boxes come back in the resized frame; everything downstream works in
-      // original pixels, so undo the resize here and nowhere else.
-      scaleX: width / inW,
-      scaleY: height / inH,
+      // Boxes come back in the letterboxed frame; everything downstream works
+      // in original pixels, so undo the resize here and nowhere else.
+      scaleX: width / nw,
+      scaleY: height / nh,
       imageWidth: width,
       imageHeight: height
     });
+
+    const blocks = decodeBlocks(result[blkName].data, {
+      stride: result[blkName].dims[2],
+      count: result[blkName].dims[1],
+      r, width, height, confThreshold, nmsThreshold
+    });
+
+    // Crop the pad off BEFORE scaling to page size, or the mask lands offset by
+    // the padding's share of the edge -- which looks like a plausible small
+    // misalignment rather than like a bug, and erases the wrong pixels.
+    const seg = resizeMap(
+      cropChannel(result[segName].data, { size: CTD_SIZE, nw, nh }),
+      nw, nh, width, height);
+
+    return { lines: fuse(lines, blocks), seg };
   }
 }

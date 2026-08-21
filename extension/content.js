@@ -213,15 +213,16 @@
         japanese: r.japanese, english: r.english
       }))
     );
-    // The measured surface, so BUSY_STD and MIN_SHARE in background.js can be
-    // tuned against real numbers rather than guessed at. `tex` regions have no
-    // bubble, so they get a heavy halo and no fill; the rest are covered in
-    // `fill`.
+    // The measured surface, so the ink/halo decision in background.js can be
+    // tuned against real numbers rather than guessed at. `fill` is no longer
+    // painted anywhere -- it is the measured background colour, and all it
+    // decides now is whether the lettering goes black-on-white or the reverse.
     console.table(
       page.regions.map((r) => ({
-        order: r.order, kind: r.kind,
-        lum: r.bgLum, sd: r.bgStd, share: r.bgShare, peak: r.bgPeak, tex: r.textured,
+        order: r.order, kind: r.kind, bubble: r.inBubble,
+        lum: r.bgLum, sd: r.bgStd, share: r.bgShare, peak: r.bgPeak,
         fill: r.fill ? `rgb(${r.fill.join(",")})` : "—",
+        dark: r.darkBg,
         widen: r.vertical ? r.widenedBy : "—"
       }))
     );

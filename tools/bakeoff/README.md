@@ -104,6 +104,38 @@ fixture pages, 0.5 coverage threshold):
 | `paddle-960` / `-1536` / `-2048` | Apache-2.0 | PaddleOCR DB head, mobile. 4.7MB, the shippable one |
 | `paddle-server-1536` | Apache-2.0 | Same architecture, 113MB. Not shippable — it is here to separate "the mobile model is too small" from "DB is wrong for manga" |
 | `craft-1536` / `-2048` | MIT | Scores characters and their affinity rather than assuming horizontal lines, which is in principle the right shape for vertical Japanese |
+| `ctd-blk` / `-det` / `-union` / `-fused` | GPL-3.0 | comic-text-detector, the model that produced the baseline. Four entries because it has two box heads: `blk` gives blocks, `det` gives lines, `union` is both, `fused` is lines plus the blocks no line landed in. `fused` is what ships |
+
+**The GPL gate was lifted once, for `ctd`, deliberately.** Everything above it
+was chosen under a hard rule — a GPL candidate is disqualified regardless of
+quality, because it rebuilds the wall the v0.4 rewrite exists to remove. The
+rule was written about *boxes*, and it held: PaddleOCR won that comparison and
+shipped. What reopened it is that the overlay stopped covering the Japanese and
+started erasing it, which needs a per-pixel glyph mask, and no permissive
+detector has one. The wall does not come back — no GPL code is linked, the
+weights are fetched at install time — but the obligation is real. The rule still
+stands for every future candidate.
+
+### Scoring `ctd` against a baseline `ctd` produced
+
+`fixtures/baseline.json` is comic-text-detector's own output from the v0.3
+sidecar, so its recall column is **partly circular** and 100% means "the ONNX
+port is faithful", not "the model is better". Read the grouping columns instead,
+which are a real measurement of box geometry through `group.js`:
+
+| | recall | exact grouping, per page | ms |
+|---|---|---|---|
+| `paddle-1536` | 92.3% | 87.5 / 92.3 / 86.4 | 260 |
+| `ctd-blk` | 85.7% | 100 / 100 / 100 — but 3 regions short on ynko | 862 |
+| `ctd-det` | 90.8% | 93.8 / 91.3 / 85.7 | 861 |
+| `ctd-union` | 100% | 94.1 / 92.9 / 77.3 | 864 |
+| `ctd-fused` | 100% | 94.1 / 92.9 / 86.4 | 852 |
+
+`union` and `fused` find the same text; the difference is what they hand
+`groupIntoBlocks`. `union` includes a whole-region box stacked on top of the
+lines inside it, which is geometry that grouper has never been shown, and ynko3
+splits three regions instead of one. `fused` adds a block box only where no line
+was found at all.
 
 `maxSide` is swept because it is the setting most often mistaken for the model.
 PaddleOCR's own default caps the long edge at 960px — tuned for photographs of

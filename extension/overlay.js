@@ -72,6 +72,28 @@
     :host { all: initial; }
     .layer { position: absolute; inset: 0; pointer-events: none; }
 
+    /* THE CLEAN PLATE: the whole page with the Japanese erased, drawn over the
+       original at exactly its rendered size. Every region sits on it, which is
+       why there is only one kind of region below -- the question "what is
+       behind this text" has the same answer everywhere now.
+
+       Sized in percentages rather than pixels so it follows the host, which is
+       already positioned and sized from the image's bounding rect on every
+       resize, zoom and reflow. Nothing here needs to know the page's natural
+       dimensions.
+
+       image-rendering is left at the default: the plate IS the page at natural
+       size, so the browser is doing the same downscale it already does to the
+       image underneath, and matching it is the point. */
+    .plate {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      z-index: 0;
+    }
+
     .region {
       position: absolute;
       display: flex;
@@ -105,96 +127,45 @@
       cursor: default;
     }
 
-    /* --fill, --ink and --halo are set per region from the pixels measured in
-       the service worker. Covering the original is not optional for anything
-       longer than an SFX -- leaving Japanese visible under English makes both
-       unreadable -- so the only open question is what colour to cover it in,
-       and that is a measurement, not a guess about kind. Defaults here are the
-       old white assumption, used only if a region arrives unmeasured. */
+    /* --ink and --halo are set per region from the pixels measured in the
+       service worker, and are all that is left of that measurement: there is
+       no --fill because nothing is filled any more. Defaults here are the old
+       white-bubble assumption, used only if a region arrives unmeasured. */
     .region {
-      --fill: #fff;
       --ink: #000;
       --halo: #fff;
-    }
-
-    /* THE FILL COVERS THE WHOLE BOX. Every edge of that box was probed in
-       lib/layout.js and found to be the same surface the region sits on, so
-       there is nothing at the rim for a fill to damage and no reason to stop
-       short of it. The old rule faded out at 72% of an ellipse, which left the
-       Japanese showing around the edges of the very region it was covering.
-       RIM is all that is left of the fade: enough to kill the aliasing where
-       the fill meets a bubble's own outline, and to keep a solid patch from
-       banding against a surface that is subtly graded. Nothing extends past
-       the box.
-
-       Masked on both axes rather than drawn as one radial gradient, because
-       the shape has to come from the geometry and not from the region kind: a
-       rectangular grey narration panel that the model tagged "thought" used to
-       get an ellipse, and lost its corners.
-
-       The fill is a pseudo-element rather than the region's own background,
-       because a mask applies to everything the element paints -- the text
-       included. Masking the region itself feathers the glyphs nearest the edge
-       and makes the lettering look like it is dissolving into the bubble. */
-    .region.filled {
-      /* Hard-edged unless the region says otherwise. A soft edge is a
-         translucent one, and translucency belongs only over margin we won --
-         never over the Japanese being covered. */
-      --rim-l: 0%;
-      --rim-r: 0%;
-      --rim-t: 0%;
-      --rim-b: 0%;
+      /* Above the plate, stated rather than inherited from tree order. The
+         regions are appended after the plate so they would paint above it
+         anyway today, but that is an accident of insertion order and one
+         reordering away from every translation vanishing behind an image of
+         the page it belongs to. */
+      z-index: 1;
       color: var(--ink);
       /* In em, not %. Percentage padding resolves against the box's WIDTH on
          every side, so a wide short box lost ~30% of its height to top and
          bottom padding and had to set its text smaller to compensate. In em it
-         tracks the lettering instead, which is what the inset is actually for. */
+         tracks the lettering instead. */
       padding: 0.1em 0.3em;
-    }
 
-    .region.filled::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      z-index: -1;
-      background: var(--fill);
-      mask-image:
-        linear-gradient(to bottom, transparent 0, #000 var(--rim-t),
-                        #000 calc(100% - var(--rim-b)), transparent 100%),
-        linear-gradient(to right, transparent 0, #000 var(--rim-l),
-                        #000 calc(100% - var(--rim-r)), transparent 100%);
-      mask-composite: intersect;
-    }
-
-    /* NO BACKDROP AT ALL -- just a very heavy halo.
-       Text set on a panel tone or straight onto artwork has no bubble to fill,
-       and everything tried in place of one was worse than nothing: an opaque
-       box reads as a patch stuck onto the art, and a soft radial pad is still a
-       grey smear over the drawing. What actually works is the scanlation
-       answer, which is to stop trying to replace the background and instead
-       make the lettering survive whatever is behind it.
-       The stroke separates each glyph from the art, and the stacked shadows
-       build a thick opaque cushion that follows the text's own shape. The
-       repeats are the point: each identical shadow compounds the alpha, so six
-       of them turn a blur into something solid enough to read English off.
-       Tuned by eye against real pages -- it is meant to look like too much. */
-    .region.outlined {
-      background: none;
-      color: var(--ink);
-      -webkit-text-stroke: 0.18em var(--halo);
+      /* THE HALO IS NOW A STYLE CHOICE, WHICH IT USED TO NOT BE.
+         It began as the only way to make English readable on top of Japanese
+         that could not be removed: a 0.18em stroke and eight stacked shadows,
+         tuned by eye, meant to look like too much -- because too much was what
+         it took to win against the artwork AND the lettering underneath it.
+         The plate removes the lettering, so what is left to survive is only the
+         artwork: screentone, hatching, a panel tone. That needs separation, not
+         a cushion. A light stroke does it, and it does not read as a sticker.
+         On a repaired white bubble it costs nothing and is invisible. */
+      -webkit-text-stroke: 0.08em var(--halo);
       paint-order: stroke fill;
-      padding: 0;
-      text-shadow:
-        0 0 0.30em var(--halo), 0 0 0.30em var(--halo),
-        0 0 0.30em var(--halo), 0 0 0.30em var(--halo),
-        0 0 0.60em var(--halo), 0 0 0.60em var(--halo),
-        0 0 0.60em var(--halo), 0 0 0.90em var(--halo);
+      text-shadow: 0 0 0.12em var(--halo), 0 0 0.24em var(--halo);
     }
 
-    /* SFX keeps a lighter stroke and its tracking, so it still reads as SFX
-       rather than as narration that happened to land on artwork. */
+    /* SFX keeps its tracking, so it still reads as SFX rather than as
+       narration that happened to land on artwork. It no longer needs a
+       different stroke: the reason it had one was that SFX always outlined
+       while everything else filled, and there was a jump between the two. */
     .region.sfx {
-      -webkit-text-stroke: 0.09em var(--halo);
       letter-spacing: 0.02em;
     }
 
@@ -303,7 +274,15 @@
   function layout(host, layer, img) {
     const t0 = performance.now();
     const r = positionHost(host, img);
-    const els = Array.from(layer.children);
+    // REGIONS ONLY, not every child of the layer. The clean plate is an <img>
+    // in here too, and it has no data-bounds -- so `layer.children` put it
+    // through JSON.parse(undefined) on the first iteration of the map below,
+    // which threw and abandoned layout() before a single region was positioned.
+    // Every region then rendered at its static position and default size:
+    // twenty translations stacked on top of each other at the top of the page,
+    // with no error visible unless you notice the "fitted N region(s)" line
+    // missing from the log.
+    const els = Array.from(layer.querySelectorAll(".region"));
 
     // SKIP IF NOTHING MOVED. fitText binary-searches the font size, and every
     // step reads scrollHeight straight after writing fontSize, which forces a
@@ -381,32 +360,36 @@
     layer.className = "layer";
     shadow.appendChild(layer);
 
+    // THE PLATE FIRST, so every region lands on top of it.
+    //
+    // A data URL rather than a blob URL: a blob URL has to be revoked or it
+    // leaks for the lifetime of the tab, and an overlay that is torn down and
+    // rebuilt on every resize would leak one per rebuild. The base64 is a few
+    // hundred KB and the decode is off the main thread.
+    //
+    // A page cached before plates existed arrives without one and simply
+    // renders on the original background, which is what it did before.
+    if (page.plate) {
+      const plate = document.createElement("img");
+      plate.className = "plate";
+      plate.src = `data:image/png;base64,${page.plate}`;
+      plate.alt = "";
+      layer.appendChild(plate);
+    }
+
     for (const region of page.regions) {
       const el = document.createElement("div");
       const untranslated = !region.english;
-      // Busyness is measured from the pixels underneath, not inferred from kind.
-      // SFX always outlines however uniform it measured -- it is short, it sits
-      // on artwork by nature, and filling behind it destroys the panel.
-      // Two surfaces, and the split is simply whether there is a real bubble.
-      // Inside one, fill it. Anywhere else -- a panel tone, bare artwork, an
-      // SFX -- paint nothing and let the halo carry the text.
-      const surface =
-        (region.textured || region.kind === "sfx") ? " outlined" : " filled";
+      // ONE SURFACE. There used to be two -- filled inside a drawn bubble,
+      // outlined everywhere else -- and the split was never about taste: a
+      // rectangle is safe on a bubble's flat interior and destroys artwork
+      // anywhere else, so text on a panel tone had to be left sitting on top of
+      // the Japanese with a halo heavy enough to win. The plate erases the
+      // Japanese instead, so both cases now have a clean background and there
+      // is nothing left for the branch to decide.
       el.className =
-        `region ${region.kind}${surface}${untranslated ? " untranslated" : ""}`;
+        `region ${region.kind}${untranslated ? " untranslated" : ""}`;
 
-      // Fill and text colour follow the measured background rather than an
-      // assumption about what a bubble looks like.
-      if (region.fill) {
-        el.style.setProperty("--fill", `rgb(${region.fill.join(",")})`);
-      }
-      // Soften the fill's edge only across margin the box actually won. A
-      // region the probe could not grow gets a hard edge and full coverage.
-      if (region.rim) {
-        for (const side of ["l", "r", "t", "b"]) {
-          el.style.setProperty(`--rim-${side}`, `${region.rim[side] * 100}%`);
-        }
-      }
       // Stark, like the scans this imitates -- they letter in pure black on
       // pure white, and a near-black on a near-white reads as washed out next
       // to the artwork's own solid blacks.

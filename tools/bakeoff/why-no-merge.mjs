@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadRaster } from "./lib/image.mjs";
-import { paddleCandidate } from "./candidates/paddle-db.mjs";
+import { ctdCandidate } from "./candidates/ctd.mjs";
 
 const MIN_PARALLEL_OVERLAP = 0.35;
 const ADJACENT_GAP_RATIO = 0.9;
@@ -23,7 +23,7 @@ const yMin = Number(process.argv[3] ?? 540);
 const yMax = Number(process.argv[4] ?? 800);
 
 const raster = await loadRaster(join(FIXTURES, "pages", name));
-const detector = paddleCandidate({ maxSide: 1536, label: "paddle-1536" });
+const detector = ctdCandidate({ label: "ctd-fused" });
 await detector.init();
 const all = await detector.detect(raster);
 

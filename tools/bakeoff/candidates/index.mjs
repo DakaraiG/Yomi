@@ -9,6 +9,7 @@
 import classical from "./classical.mjs";
 import { paddleCandidate } from "./paddle-db.mjs";
 import { craftCandidate } from "./craft.mjs";
+import { ctdCandidate } from "./ctd.mjs";
 
 export const CANDIDATES = {
   classical,
@@ -25,7 +26,19 @@ export const CANDIDATES = {
   }),
 
   "craft-1536": craftCandidate({ maxSide: 1536, label: "craft-1536" }),
-  "craft-2048": craftCandidate({ maxSide: 2048, label: "craft-2048" })
+  "craft-2048": craftCandidate({ maxSide: 2048, label: "craft-2048" }),
+
+  // GPL-3.0, and on the roster for its segmentation head rather than for its
+  // boxes -- see fetch-models.mjs. Note that this model produced
+  // fixtures/baseline.json: a recall number well under 100% is a bug in
+  // candidates/ctd.mjs, not a finding about the model. The two heads are
+  // separate entries because they answer different questions -- blk returns
+  // BLOCKS, the baseline's own granularity, det returns lines like everything
+  // else here.
+  "ctd-blk": ctdCandidate({ head: "blk", label: "ctd-blk" }),
+  "ctd-det": ctdCandidate({ head: "det", label: "ctd-det" }),
+  "ctd-union": ctdCandidate({ head: "union", label: "ctd-union" }),
+  "ctd-fused": ctdCandidate({ head: "fused", label: "ctd-fused" })
 };
 
 export const DEFAULT_SET = [

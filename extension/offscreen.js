@@ -6,12 +6,13 @@
 // pages. The service worker cannot hold it -- it gets killed on idle -- so the
 // worker stays a thin router and this document does the work.
 //
-// It returns the numbered PNG plus the regions' geometry. The service worker
-// owns the network call, because it owns the API key and keys should live in
-// as few places as possible.
+// It returns the numbered PNG, the clean plate, and the regions' geometry. The
+// service worker owns the network call, because it owns the API key and keys
+// should live in as few places as possible.
 
 import { Detector } from "./lib/detect.js";
 import { rasterFromBlob } from "./lib/imageops.js";
+import { textMask, diffusionInpaint } from "./lib/inpaint.js";
 import { groupIntoBlocks } from "./lib/group.js";
 import { panelReadingOrder } from "./lib/ordering.js";
 import { drawNumberedBoxes, HANDOFF } from "./lib/render.js";
@@ -21,7 +22,7 @@ const detector = new Detector();
 let ready = null;
 
 // Model load is a one-off but not a small one: a 26MB WASM binary to compile
-// plus a 4.7MB model to parse. Generous, but bounded -- an unbounded wait is
+// plus a 91MB model to parse. Generous, but bounded -- an unbounded wait is
 // indistinguishable from a hang, and that ambiguity has cost several rounds of
 // debugging already.
 const LOAD_TIMEOUT_MS = 120_000;
@@ -56,12 +57,62 @@ function ensureReady() {
 globalThis.__yomi = { detector, prepare: (...args) => prepare(...args) };
 
 /**
- * Bytes in, numbered page out.
+ * The page with the Japanese erased, plus the mask that erased it.
+ *
+ * This is what replaced painting a rectangle over each region. A rectangle is
+ * only safe inside a drawn bubble, where the interior is flat by construction;
+ * anywhere else it punches a hole in the artwork, which is why non-bubble text
+ * used to be left visible under a heavy halo instead. A per-pixel mask touches
+ * only glyph strokes, so the drawing survives and every region gets a clean
+ * background regardless of what it sits on.
+ *
+ * BOTH are returned. The plate is what the overlay draws; the mask is what the
+ * service worker caches, because it is 1-bit and mostly empty where the plate
+ * is a full-page PNG, and re-running diffusion on a cache hit costs less than
+ * a megabyte of IndexedDB per page. See background.js.
+ *
+ * @param {{width:number,height:number,data:Uint8ClampedArray}} raster
+ * @param {Float32Array} seg  page-resolution text probability
+ */
+async function buildCleanPlate(raster, seg) {
+  const { width, height } = raster;
+  const mask = textMask(seg, width, height);
+  const clean = diffusionInpaint(raster, mask);
+
+  const toPng = async (data) => {
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext("2d");
+    const image = new ImageData(data, width, height);
+    ctx.putImageData(image, 0, 0);
+    const blob = await canvas.convertToBlob({ type: "image/png" });
+    return bytesToBase64(await blob.arrayBuffer());
+  };
+
+  // Black and white RGBA rather than a packed bitset: PNG's filters flatten a
+  // page of solid black with thin white strokes to a few tens of KB, where the
+  // raw bits are 1 byte per 8 pixels before base64 makes them a third bigger.
+  const maskRgba = new Uint8ClampedArray(width * height * 4);
+  for (let p = 0, i = 0; p < mask.length; p++, i += 4) {
+    const v = mask[p] ? 255 : 0;
+    maskRgba[i] = maskRgba[i + 1] = maskRgba[i + 2] = v;
+    maskRgba[i + 3] = 255;
+  }
+
+  const [plate, maskPng] = await Promise.all([toPng(clean.data), toPng(maskRgba)]);
+  return { plate, mask: maskPng };
+}
+
+/**
+ * Bytes in, numbered page and clean plate out.
  *
  * The pipeline order is load-bearing: detect gives lines, group gives regions,
  * ORDER gives them their numbers, and only then are they drawn. The label IS
  * the id the model answers with and the overlay looks regions up by it, so
  * numbering before ordering would put every translation in the wrong bubble.
+ *
+ * The plate comes last and depends on nothing but the raster and the mask, so
+ * it could equally run first; it is here so the numbered render -- the thing
+ * the model is waiting on -- is not held up behind half a second of diffusion.
  */
 async function prepare({ imageB64, mimeType }) {
   // Stage timings, because "slow" is not a diagnosis. Detection on the CPU
@@ -81,7 +132,7 @@ async function prepare({ imageB64, mimeType }) {
     new Blob([base64ToBytes(imageB64)], { type: mimeType }));
   mark("decode");
 
-  const lines = await withTimeout(
+  const { lines, seg } = await withTimeout(
     detector.detect(raster), DETECT_TIMEOUT_MS,
     `detection on a ${raster.width}x${raster.height} page`);
   mark("detect");
@@ -104,8 +155,13 @@ async function prepare({ imageB64, mimeType }) {
   const numbered = bytesToBase64(await png.arrayBuffer());
   mark("render");
 
+  const { plate, mask } = await buildCleanPlate(raster, seg);
+  mark("plate");
+
   return {
     numbered,
+    plate,
+    mask,
     backend: detector.backend,
     // Propagated rather than only logged: this document has its own console,
     // reachable only through the extension's card in chrome://extensions, so a
@@ -127,8 +183,10 @@ async function prepare({ imageB64, mimeType }) {
         [b.x0 / raster.width, b.y1 / raster.height]
       ],
       vertical: (b.y1 - b.y0) > (b.x1 - b.x0),
-      // Whether a bubble was actually drawn around this text. The overlay only
-      // paints a box when there is one.
+      // Whether a bubble was actually drawn around this text. No longer decides
+      // whether the background can be repaired -- the plate repairs it either
+      // way -- but still the right signal for how much room a box has to grow
+      // into, which is lib/layout.js's question.
       inBubble: b.inBubble === true
     }))
   };

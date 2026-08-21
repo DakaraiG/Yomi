@@ -4,8 +4,10 @@ Chrome MV3, development build, unpacked only. This is the whole product: as of
 v0.4 there is no sidecar and no backend, and nothing runs outside the browser
 except the translation call.
 
-MIT, like the rest of the repository. Nothing here is GPL, which is the point of
-the v0.4 rewrite — see the [root README](../README.md).
+MIT, like the rest of the repository. The detection model it installs is not:
+`comictextdetector.pt.onnx` is GPL-3.0. It is fetched at install time and never
+committed, and no code here links anything GPL, but a working build does contain
+that file — see the [root README](../README.md) for why the trade was made.
 
 ## Install
 
@@ -15,7 +17,7 @@ binaries are fetched rather than committed:
 ```bash
 cd ../tools/bakeoff
 npm install
-node fetch-models.mjs paddle-v4
+node fetch-models.mjs ctd
 node install-extension-assets.mjs
 ```
 

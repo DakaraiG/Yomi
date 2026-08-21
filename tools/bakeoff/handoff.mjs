@@ -17,7 +17,7 @@ import { createCanvas } from "@napi-rs/canvas";
 
 import { loadRaster } from "./lib/image.mjs";
 import { drawNumberedBoxes, HANDOFF } from "./lib/render.mjs";
-import { paddleCandidate } from "./candidates/paddle-db.mjs";
+import { ctdCandidate } from "./candidates/ctd.mjs";
 import { groupIntoBlocks } from "../../extension/lib/group.js";
 import { panelReadingOrder } from "../../extension/lib/ordering.js";
 
@@ -46,7 +46,7 @@ export async function buildRegions(raster, detector) {
 }
 
 async function main() {
-  const detector = paddleCandidate({ maxSide: 1536 });
+  const detector = ctdCandidate({ label: "ctd-fused" });
   await detector.init();
 
   const scale = Number(arg("scale", "1"));

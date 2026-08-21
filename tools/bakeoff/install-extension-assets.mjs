@@ -2,10 +2,11 @@
 //
 //   node install-extension-assets.mjs
 //
-// ~18MB of ONNX Runtime and one detection model. Both are reproducible -- the
-// runtime from npm, the model from the pinned URL in fetch-models.mjs -- so
+// ~18MB of ONNX Runtime and one 91MB detection model. Both are reproducible --
+// the runtime from npm, the model from the pinned URL in fetch-models.mjs -- so
 // they are fetched rather than committed, the same way the v0.3 detector
-// weights always were.
+// weights always were. The model being GPL-3.0 is a second reason not to commit
+// it; see fetch-models.mjs.
 //
 // The extension does not start without them: the offscreen document fails on
 // its first import with a module-not-found for ort.wasm.bundle.min.mjs.
@@ -58,8 +59,12 @@ async function companionsOf(entry) {
   return [...new Set(found)];
 }
 
-// The Phase 1 winner: PaddleOCR DB mobile, Apache-2.0, 4.7MB, 92.3% recall.
-const MODEL = "paddle-v4";
+// comic-text-detector: GPL-3.0, 91MB, and the only candidate that returns a
+// per-pixel text mask -- which is what lib/inpaint.js needs to erase the
+// Japanese rather than cover it. It replaced the Phase 1 winner (PaddleOCR DB
+// mobile, Apache-2.0, 4.7MB) when the question changed from "which boxes" to
+// "how do we repair what is under them". See lib/detect.js.
+const MODEL = "ctd";
 
 async function exists(path) {
   try { await stat(path); return true; } catch { return false; }
@@ -80,6 +85,16 @@ async function main() {
   // leave 25MB of the old one behind looking authoritative.
   for (const stale of await readdir(join(EXTENSION, "vendor", "ort"))) {
     if (/^ort/.test(stale)) await rm(join(EXTENSION, "vendor", "ort", stale));
+  }
+
+  // Same for models. The extension loads exactly one, by name, from
+  // lib/detect.js -- a leftover from the previous detector is 5-100MB of dead
+  // weight that looks like it is in use.
+  for (const stale of await readdir(join(EXTENSION, "models"))) {
+    if (stale !== MODELS[MODEL].file && /\.onnx$/.test(stale)) {
+      await rm(join(EXTENSION, "models", stale));
+      console.log(`  model  removed stale ${stale}`);
+    }
   }
 
   const ortFiles = [ORT_ENTRY, ...await companionsOf(ORT_ENTRY)];

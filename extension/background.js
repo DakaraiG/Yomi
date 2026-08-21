@@ -22,13 +22,14 @@
 //     Access-Control-Allow-Origin.
 // Each approach fails on exactly what the other solves. Hence tier 2.
 
-import { bytesToBase64 } from "./lib/bytes.js";
+import { base64ToBytes, bytesToBase64 } from "./lib/bytes.js";
 import { contentHash, get as cacheGet, set as cacheSet } from "./lib/cache.js";
 import { translatePage, mergeRegions, cacheKey, DEFAULTS } from "./lib/translate.js";
 import { deriveSeriesId } from "./lib/series.js";
 import { measureBackground, stripStats, snapFill } from "./lib/surface.js";
 import { shapeBox } from "./lib/layout.js";
 import { createBudget, DEFAULT_LIMIT } from "./lib/budget.js";
+import { diffusionInpaint } from "./lib/inpaint.js";
 
 // A RANGE, not a single id.
 //
@@ -248,56 +249,71 @@ async function preparePage(buffer, mimeType) {
 // anything behind the text. It was measuring text density and being read as
 // artwork detection.
 //
-// A REGION WITHOUT A BUBBLE STILL GETS A BACKDROP. Thought text set straight
-// onto a screentone panel has no drawn bubble to fill, and outlining it leaves
-// the reader picking English out of the Japanese underneath. Grouping now
-// merges those columns into one block (see lib/group.js), and that block is
-// treated as a bubble the artist did not draw: filled, with a colour measured
-// from what it sits on.
+// NONE OF THAT DECIDES A BACKGROUND ANY MORE. There used to be a rule here --
+// inside a drawn bubble, paint a rectangle; anywhere else paint nothing and let
+// a heavy halo carry the text -- and the rule was right for as long as a
+// rectangle was the only fill shape available. The clean plate erases the
+// glyph strokes themselves, so every region now sits on repaired background
+// whether or not anyone drew a bubble around it, and the split is gone.
 //
-// The rule is simply whether a bubble was drawn. Inside one, fill it: a bubble
-// interior is a closed flat light region by construction, which is exactly what
-// the connected-component pass found it by. Anywhere else -- a panel tone, bare
-// artwork, a title on open page -- paint nothing and let the halo carry it.
-//
-// This replaced a pixel test (bgPeak against a flatness threshold) that could
-// not work in principle: text on a blank part of a page measures every bit as
-// flat as text in a bubble, so it drew white boxes on open artwork. No
-// statistic of the region's own pixels can see an outline that is not there.
+// What survives is the part that was never about covering anything: WHAT
+// COLOUR THE TEXT SHOULD BE. That is still measured from the original pixels,
+// through surface.js's block-averaged sampler, which is what makes it correct
+// on screentone rather than fooled by it.
 const DARK_BG = 0.5;        // bg luminance below which text flips to light ink
-const RIM_MAX = 0.05;       // most of the fill's edge that may be soft
-
-/** Margin fraction available for a soft edge, capped at RIM_MAX. */
-const rimFraction = (v) => Math.max(0, Math.min(RIM_MAX, v));
 
 /**
- * Attach fill colour, background luminance, texture and a layout box to every
- * region.
+ * Decode the page once, for everything in this worker that needs pixels.
+ *
+ * Both consumers -- the colour measurement and the clean plate -- want the same
+ * full-page ImageData, and decoding a two-megabyte JPEG twice per page is the
+ * kind of cost that never shows up in a profile because it is spread across two
+ * functions that each look cheap.
+ *
+ * @returns {Promise<{ctx:OffscreenCanvasRenderingContext2D,width:number,height:number}|null>}
+ *   null when the bytes cannot be decoded at all.
+ */
+async function decodePage(buffer) {
+  let bmp;
+  try {
+    bmp = await createImageBitmap(new Blob([buffer]));
+  } catch {
+    return null;
+  }
+  // Dimensions read BEFORE close(). Closing an ImageBitmap sets its width and
+  // height to zero, so returning them from the closed object hands every caller
+  // a zero-sized page -- and the failure is a silent one: no region matches, no
+  // error is thrown, the overlay simply comes back empty.
+  const { width, height } = bmp;
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close?.();
+  return { ctx, width, height };
+}
+
+/**
+ * Attach ink colour, background luminance and a layout box to every region.
  *
  * Run on every page including cache hits, not stored as a property of the
  * translation: these are rendering decisions measured from bytes we already
  * hold, so tuning a threshold should take effect immediately rather than
  * needing the cache thrown away.
  */
-async function annotateBackgrounds(buffer, page) {
+function annotateBackgrounds(surface, page) {
   // Fall back to the old assumption -- a white bubble with dark text -- only if
   // the pixels are genuinely unavailable.
   const UNKNOWN = {
     fill: [255, 255, 255], bgLum: 1, bgStd: 0, bgShare: 1, bgPeak: 1,
-    textured: false, darkBg: false
+    darkBg: false
   };
 
-  let bmp;
-  try {
-    bmp = await createImageBitmap(new Blob([buffer]));
-  } catch {
+  if (!surface) {
     page.regions.forEach((r) => Object.assign(r, UNKNOWN));
     return page;
   }
 
-  const canvas = new OffscreenCanvas(bmp.width, bmp.height);
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(bmp, 0, 0);
+  const { ctx, width: pageW, height: pageH } = surface;
 
   // Pixel boxes for every region first: shaping one needs to know where the
   // others are.
@@ -305,15 +321,15 @@ async function annotateBackgrounds(buffer, page) {
     const xs = r.polygon.map((p) => p[0]);
     const ys = r.polygon.map((p) => p[1]);
     return {
-      x0: Math.max(0, Math.floor(Math.min(...xs) * bmp.width)),
-      x1: Math.min(bmp.width, Math.ceil(Math.max(...xs) * bmp.width)),
-      y0: Math.max(0, Math.floor(Math.min(...ys) * bmp.height)),
-      y1: Math.min(bmp.height, Math.ceil(Math.max(...ys) * bmp.height))
+      x0: Math.max(0, Math.floor(Math.min(...xs) * pageW)),
+      x1: Math.min(pageW, Math.ceil(Math.max(...xs) * pageW)),
+      y0: Math.max(0, Math.floor(Math.min(...ys) * pageH)),
+      y1: Math.min(pageH, Math.ceil(Math.max(...ys) * pageH))
     };
   });
 
   const probe = (x, y, w, h) =>
-    (w >= 1 && h >= 1 && x >= 0 && y >= 0 && x + w <= bmp.width && y + h <= bmp.height)
+    (w >= 1 && h >= 1 && x >= 0 && y >= 0 && x + w <= pageW && y + h <= pageH)
       ? stripStats(ctx.getImageData(x, y, Math.round(w), Math.round(h)).data)
       : null;
 
@@ -326,18 +342,11 @@ async function annotateBackgrounds(buffer, page) {
     const measured = measureBackground(ctx.getImageData(box.x0, box.y0, w, h).data);
     Object.assign(r, measured ?? UNKNOWN);
 
-    // NO DRAWN BUBBLE MEANS NO BOX. bgPeak cannot settle this on its own: text
-    // on a blank part of a page measures just as flat as text in a bubble, so
-    // the pixels alone would put a white rectangle on open artwork. The
-    // enclosure test from grouping is the authority; bgPeak only decides
-    // whether an actual bubble's interior is flat enough to fill starkly.
-    r.textured = !r.inBubble;
-    // Stark white beats a measured 252, which reads as a grey patch on a white
-    // bubble. Still computed for outlined regions, because it is what decides
-    // the ink and halo colours.
+    // Snapped before it is read for luminance: a bubble that measures 252 is
+    // white, and treating it as almost-white puts the ink/halo decision on the
+    // wrong side of a threshold for regions that are plainly one thing or the
+    // other. Nothing paints this colour any more -- it exists to be measured.
     r.fill = snapFill(r.fill);
-    // Ink follows what we are about to paint, not what was measured -- on a
-    // textured region those differ by a lot.
     r.darkBg = (r.fill[0] * 0.299 + r.fill[1] * 0.587 + r.fill[2] * 0.114) / 255
                < DARK_BG;
 
@@ -347,40 +356,80 @@ async function annotateBackgrounds(buffer, page) {
       vertical: r.vertical,
       base: r,
       neighbours: boxes,
-      imageW: bmp.width,
-      imageH: bmp.height,
+      imageW: pageW,
+      imageH: pageH,
       probe
     });
     r.box = {
-      x: shaped.x0 / bmp.width,
-      y: shaped.y0 / bmp.height,
-      w: (shaped.x1 - shaped.x0) / bmp.width,
-      h: (shaped.y1 - shaped.y0) / bmp.height
+      x: shaped.x0 / pageW,
+      y: shaped.y0 / pageH,
+      w: (shaped.x1 - shaped.x0) / pageW,
+      h: (shaped.y1 - shaped.y0) / pageH
     };
     r.widenedBy = +((shaped.x1 - shaped.x0) / w).toFixed(2);
 
-    // How much of the box is MARGIN -- the part we won past the detected text.
-    //
-    // The overlay softens the outermost edge of the fill, which is what makes a
-    // rectangle survive an irregular bubble. But a soft edge is a translucent
-    // one, and translucency over Japanese lets it bleed through and breaks the
-    // illusion completely. So the soft rim is allowed only as far as the margin
-    // reaches: where the box grew, it fades over empty bubble; where the probe
-    // refused to grow it, the box IS the text and the fill goes hard-edged and
-    // covers it outright.
-    // Per side, because growth is rarely symmetric: a bubble often has room on
-    // one side and its wall on the other, and taking the smaller of the two
-    // would throw away a perfectly good soft edge.
-    const sw = shaped.x1 - shaped.x0, sh = shaped.y1 - shaped.y0;
-    r.rim = {
-      l: +rimFraction((box.x0 - shaped.x0) / sw).toFixed(4),
-      r: +rimFraction((shaped.x1 - box.x1) / sw).toFixed(4),
-      t: +rimFraction((box.y0 - shaped.y0) / sh).toFixed(4),
-      b: +rimFraction((shaped.y1 - box.y1) / sh).toFixed(4)
-    };
+    // The per-side `rim` fractions went with the fill. They existed to say how
+    // far a rectangle's soft edge could fade before it started fading over
+    // Japanese, which is not a question anyone asks about a background that no
+    // longer has any Japanese in it.
   });
 
+  return page;
+}
+
+/**
+ * Attach the clean plate: the page with the glyph strokes repainted.
+ *
+ * The plate is built in the offscreen document on the miss path, because that
+ * is where the mask comes from. This is the CACHE HIT path, and it exists
+ * because a cache hit skips the offscreen document entirely.
+ *
+ * WHAT IS CACHED IS THE MASK, NOT THE PLATE. A plate is a full-page PNG, a few
+ * hundred KB to a megabyte; the mask is one bit per pixel and mostly empty, so
+ * PNG takes it down to a few tens of KB, and 500 cached pages is the difference
+ * between tens of megabytes of IndexedDB and hundreds. Re-running diffusion
+ * costs a few hundred ms against a cached page that already costs nothing, and
+ * it keeps the same shape as annotateBackgrounds: re-derive from the bytes we
+ * hold rather than trust a stored rendering.
+ *
+ * A page cached before plates existed has no mask. It renders on the original
+ * background, which is what it did before this change -- worse, not broken.
+ */
+async function attachCleanPlate(surface, page) {
+  if (page.plate || !page.mask || !surface) return page;
+
+  let bmp;
+  try {
+    bmp = await createImageBitmap(new Blob([base64ToBytes(page.mask)], { type: "image/png" }));
+  } catch {
+    return page;
+  }
+
+  const { width, height } = surface;
+  // A mask from a differently-sized decode cannot be trusted to line up, and a
+  // misaligned mask erases the wrong pixels -- which looks like a plausible
+  // rendering artefact rather than like a bug.
+  if (bmp.width !== width || bmp.height !== height) {
+    bmp.close?.();
+    return page;
+  }
+
+  const maskCanvas = new OffscreenCanvas(width, height);
+  const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+  maskCtx.drawImage(bmp, 0, 0);
   bmp.close?.();
+
+  const maskData = maskCtx.getImageData(0, 0, width, height).data;
+  const mask = new Uint8Array(width * height);
+  for (let i = 0, q = 0; q < mask.length; i += 4, q++) mask[q] = maskData[i] > 127 ? 1 : 0;
+
+  const raster = { width, height, data: surface.ctx.getImageData(0, 0, width, height).data };
+  const clean = diffusionInpaint(raster, mask);
+
+  const canvas = new OffscreenCanvas(width, height);
+  canvas.getContext("2d").putImageData(new ImageData(clean.data, width, height), 0, 0);
+  const blob = await canvas.convertToBlob({ type: "image/png" });
+  page.plate = bytesToBase64(await blob.arrayBuffer());
   return page;
 }
 
@@ -450,8 +499,11 @@ async function translate(ctx) {
 
   const cached = await cacheGet(key);
   if (cached) {
-    // Re-measured rather than trusted from the cache -- see annotateBackgrounds.
-    await annotateBackgrounds(buffer, cached);
+    // Re-measured and re-inpainted rather than trusted from the cache -- see
+    // annotateBackgrounds and attachCleanPlate.
+    const surface = await decodePage(buffer);
+    annotateBackgrounds(surface, cached);
+    await attachCleanPlate(surface, cached);
     return {
       page: cached, strategy, tried, cached: true,
       timing: {
@@ -527,15 +579,27 @@ async function translate(ctx) {
     // Geometry and reading order come from local detection; only the language
     // fields come from the model.
     regions: mergeRegions(prepared.regions, translated.regions),
+    // The mask that erased the Japanese, kept so a cache hit can rebuild the
+    // plate without re-running detection.
+    mask: prepared.mask,
     glossaryVersion: 0
   };
 
-  await annotateBackgrounds(buffer, page);
+  annotateBackgrounds(await decodePage(buffer), page);
 
   // Fire and forget. Caching is a side effect of translating, not part of
   // delivering the result, and awaiting it once made a cache bug indistinguish-
   // able from the whole pipeline hanging.
-  void cacheSet(key, page).catch(() => {});
+  //
+  // A SNAPSHOT, not the live object. The plate is deliberately not cached -- a
+  // full-page PNG in every entry costs hundreds of megabytes across a 500-entry
+  // cache, and it is recoverable from the mask in a few hundred ms -- but
+  // "attach it after the write" does not achieve that: cacheSet awaits openDb()
+  // before it puts anything, so the structured clone happens a tick later and
+  // would pick up whatever the object holds by then. Copying here pins what
+  // gets stored to what exists now.
+  void cacheSet(key, { ...page }).catch(() => {});
+  page.plate = prepared.plate;
 
   return {
     page, strategy, tried, cached: false,

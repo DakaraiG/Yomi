@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { writeFile } from "node:fs/promises";
 
 import { loadRaster } from "./lib/image.mjs";
-import { paddleCandidate } from "./candidates/paddle-db.mjs";
+import { ctdCandidate } from "./candidates/ctd.mjs";
 import { groupIntoBlocks } from "../../extension/lib/group.js";
 import { panelReadingOrder } from "../../extension/lib/ordering.js";
 import { measureBackground, stripStats, snapFill } from "../../extension/lib/surface.js";
@@ -27,7 +27,7 @@ const name = process.argv[2] ?? "ynko4.png";
 const raster = await loadRaster(join(FIXTURES, "pages", name));
 console.log(`${name}  ${raster.width}x${raster.height}`);
 
-const detector = paddleCandidate({ maxSide: 1536, label: "paddle-1536" });
+const detector = ctdCandidate({ label: "ctd-fused" });
 await detector.init();
 const lines = await detector.detect(raster);
 // Exactly the call offscreen.js makes: panelReadingOrder takes tuples and
@@ -94,8 +94,11 @@ ordered.forEach((b, i) => {
 
 console.table(rows);
 const texCount = rows.filter((r) => r.tex).length;
-console.log(`${rows.length} regions — ${texCount} outlined (heavy halo, no fill), ` +
-            `${rows.length - texCount} filled`);
+// Both render the same way now -- the clean plate repairs the background either
+// way -- so this counts what the enclosure test found, which is still what
+// decides how far lib/layout.js may widen a box.
+console.log(`${rows.length} regions — ${texCount} with no drawn bubble, ` +
+            `${rows.length - texCount} inside one`);
 console.log(`peak range ${Math.min(...rows.map(r => r.peak))} .. ` +
   `${Math.max(...rows.map(r => r.peak))}`);
 
@@ -106,7 +109,7 @@ if (process.argv.includes("--render")) {
   ctx.drawImage(await loadImage(join(FIXTURES, "pages", name)), 0, 0);
   ctx.lineWidth = 3;
   for (const { box, s, textured } of shaped) {
-    // Green = filled. Orange = no bubble, so heavy halo and no fill.
+    // Green = inside a drawn bubble. Orange = no bubble around it.
     ctx.strokeStyle = textured ? "rgba(255,140,0,0.95)" : "rgba(0,190,0,0.95)";
     ctx.strokeRect(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0);
     ctx.strokeStyle = "rgba(255,0,0,0.6)";

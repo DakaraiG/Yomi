@@ -1,10 +1,18 @@
 // Download the bake-off's candidate models into weights/bakeoff/.
 //
-// LICENCE IS A HARD GATE, not a footnote. The entire point of the v0.4 rewrite
-// is that comic-text-detector's GPL-3.0 forced a three-process architecture. A
-// GPL replacement would rebuild the same wall, so every entry below records its
-// licence and anything that is not MIT/Apache-2.0/BSD does not get added --
-// however good it looks.
+// EVERY ENTRY RECORDS ITS LICENCE, and that is no longer only bookkeeping:
+// comic-text-detector's GPL-3.0 is what forced v0.3's three-process
+// architecture, so the roster was originally MIT/Apache-2.0/BSD only.
+//
+// That gate was lifted deliberately, by Dak, for `ctd` and nothing else. The
+// reasoning: v0.3 needed a separate PROCESS because Python code linked the GPL
+// library, while v0.4 ships weights fetched at install time and never links
+// GPL code -- and no permissive model produces a per-pixel glyph mask, which is
+// what erasing the Japanese needs. The wall does not come back, but the
+// obligation is real; see README.md.
+//
+// This is a one-off, not a policy change. A new candidate that is not
+// MIT/Apache-2.0/BSD still does not get added without the same conversation.
 //
 //   node fetch-models.mjs            download everything missing
 //   node fetch-models.mjs paddle-v4  download one
@@ -35,6 +43,18 @@ export const MODELS = {
           "also misses a bubble, the mobile model's miss is the architecture, " +
           "not the capacity."
   },
+  ctd: {
+    file: "comictextdetector.pt.onnx",
+    url: "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.3/comictextdetector.pt.onnx",
+    licence: "GPL-3.0",
+    upstream: "dmMaze/comic-text-detector, ONNX export published in the beta-0.3 release of zyddnys/manga-image-translator",
+    note: "91MB, and the only candidate with a per-pixel text mask -- a UNet " +
+          "segmentation head alongside the detection heads. It is also what " +
+          "produced fixtures/baseline.json, so scoring it against that " +
+          "baseline tests THIS PORT, not the model: a low number means the " +
+          "letterbox or the YOLO decode below is wrong."
+  },
+
   craft: {
     file: "craft.onnx",
     url: "https://huggingface.co/KvaytG/craft-mlt-25k-onnx/resolve/main/craft.onnx",
