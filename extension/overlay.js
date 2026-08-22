@@ -169,6 +169,37 @@
       letter-spacing: 0.02em;
     }
 
+    /* THE JAPANESE IS STILL UNDER THIS ONE.
+       Set by the service worker for regions the plate deliberately left alone —
+       hand-drawn SFX out on bare artwork, where there is nothing behind the
+       strokes to reconstruct and erasing them rubs out the drawing. See
+       attachCleanPlate.
+       So this is the old .outlined treatment, kept for exactly the case it
+       was built for: a stroke to separate each glyph from the art, and stacked
+       shadows to build an opaque cushion that follows the text's own shape. The
+       repeats are the point — each identical shadow compounds the alpha, so
+       eight of them turn a blur into something solid enough to read English
+       off. Tuned by eye against real pages; it is meant to look like too much,
+       because it is winning against artwork AND the lettering underneath. */
+    .region.unerased {
+      -webkit-text-stroke: 0.18em var(--halo);
+      padding: 0;
+      text-shadow:
+        0 0 0.30em var(--halo), 0 0 0.30em var(--halo),
+        0 0 0.30em var(--halo), 0 0 0.30em var(--halo),
+        0 0 0.60em var(--halo), 0 0 0.60em var(--halo),
+        0 0 0.60em var(--halo), 0 0 0.90em var(--halo);
+      /* BESIDE THE ARTWORK, NOT ON IT. The box belongs to the drawing now --
+         that is the whole point of not erasing it -- so the English is placed
+         against its edge instead of centred in it, and is allowed out of its
+         own box, which no other region is. layout() gives it a strip next to
+         the region; this is what stops the strip from clipping a descender or
+         a wide word. */
+      overflow: visible;
+      align-items: flex-start;
+      white-space: nowrap;
+    }
+
     /* Anything the model dropped renders as the original Japanese, dimmed, so a
        gap is visible rather than silent. */
     .region.untranslated {
@@ -271,6 +302,13 @@
   const CAP_PERCENTILE = 0.8;
   const MIN_PX = 11;
 
+  // The strip an unerased region's translation is set in, as a fraction of the
+  // region's own height and as a floor in pixels. Deliberately small: this is a
+  // label next to a drawing, not a replacement for it, and a big one would
+  // cover the artwork the region was spared in order to keep.
+  const SFX_STRIP = 0.34;
+  const SFX_STRIP_PX = 16;
+
   function layout(host, layer, img) {
     const t0 = performance.now();
     const r = positionHost(host, img);
@@ -302,6 +340,25 @@
 
     const maxima = els.map((el) => {
       const b = JSON.parse(el.dataset.bounds);
+
+      // A region the plate could not repair keeps its artwork, so its box is
+      // not ours to write in. Put the translation in a strip against the
+      // outside edge instead -- below by default, above when below would leave
+      // the page -- small, and leaning on the halo to be readable over whatever
+      // it lands on. It is the scanlation convention for SFX: the drawing is
+      // left alone and the reading is set next to it.
+      if (el.classList.contains("unerased")) {
+        const strip = Math.max(SFX_STRIP_PX, b.h * r.height * SFX_STRIP);
+        const below = (b.y + b.h) * r.height;
+        const fits = below + strip <= r.height;
+        el.style.left = `${b.x * r.width}px`;
+        el.style.top = `${fits ? below : Math.max(0, b.y * r.height - strip)}px`;
+        el.style.width = `${b.w * r.width}px`;
+        el.style.height = `${strip}px`;
+        el.style.alignItems = fits ? "flex-start" : "flex-end";
+        return fitText(el, strip * 0.8);
+      }
+
       el.style.left = `${b.x * r.width}px`;
       el.style.top = `${b.y * r.height}px`;
       el.style.width = `${b.w * r.width}px`;
@@ -320,6 +377,11 @@
       // measured as able to hold wins. Setting a size a box cannot hold is what
       // made words run past the edges and get cut off mid-word.
       el.style.fontSize = `${Math.min(maxima[i], Math.max(MIN_PX, cap))}px`;
+      // An unerased region is MEANT to overflow its strip -- the strip is an
+      // anchor, not a container, and it renders with overflow visible. Checking
+      // it here would report every SFX label on the page as clipped and bury
+      // the real ones.
+      if (el.classList.contains("unerased")) return;
       const over = el.scrollHeight > el.clientHeight + 1 ||
                    el.scrollWidth > el.clientWidth + 1;
       if (over) clipped.push(el.textContent.slice(0, 30));
@@ -380,15 +442,21 @@
     for (const region of page.regions) {
       const el = document.createElement("div");
       const untranslated = !region.english;
-      // ONE SURFACE. There used to be two -- filled inside a drawn bubble,
-      // outlined everywhere else -- and the split was never about taste: a
-      // rectangle is safe on a bubble's flat interior and destroys artwork
-      // anywhere else, so text on a panel tone had to be left sitting on top of
-      // the Japanese with a halo heavy enough to win. The plate erases the
-      // Japanese instead, so both cases now have a clean background and there
-      // is nothing left for the branch to decide.
+      // ONE SURFACE, AND THE OLD ONE AS A FALLBACK. There used to be two paths
+      // chosen by geometry -- filled inside a drawn bubble, outlined everywhere
+      // else -- because a rectangle is safe on a bubble's flat interior and
+      // destroys artwork anywhere else, so text on a panel tone had to sit on
+      // top of the Japanese under a halo heavy enough to win. The plate erases
+      // the Japanese instead, so that branch is gone.
+      //
+      // What is left is not a second surface but a fallback for the regions the
+      // plate could not repair -- hand-drawn SFX on bare artwork, which the
+      // service worker deliberately leaves alone. Those still have Japanese
+      // under them, so they still need the heavy treatment. The overlay does
+      // not decide this; it renders what attachCleanPlate says it did.
+      const unerased = region.erased === false ? " unerased" : "";
       el.className =
-        `region ${region.kind}${untranslated ? " untranslated" : ""}`;
+        `region ${region.kind}${unerased}${untranslated ? " untranslated" : ""}`;
 
       // Stark, like the scans this imitates -- they letter in pure black on
       // pure white, and a near-black on a near-white reads as washed out next

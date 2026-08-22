@@ -27,16 +27,38 @@ export const DEFAULTS = {
 export class TranslationFailedError extends Error {}
 
 /**
+ * What a cached page's GEOMETRY was produced by. Bump it whenever a change
+ * makes a stored page mean something different from a fresh one:
+ *
+ *   1  PaddleOCR line boxes, no erase mask
+ *   2  comic-text-detector, fused heads, mask restricted to region boxes
+ *
+ * A cached page carries a mask, and a mask is an instruction to repaint
+ * specific pixels. When the rule that built it changes -- confining it to
+ * regions, rescaling its dilation -- every already-cached page goes on
+ * replaying the OLD instruction forever, because nothing about it looks stale.
+ * That is not a hypothetical: it cost an evening of chasing SFX damage on pages
+ * whose masks predated the fix, while the fix worked perfectly on new ones.
+ */
+export const PIPELINE_VERSION = 2;
+
+/**
  * Cache key for a page.
  *
  * THE MODEL ID IS PART OF THE KEY, and this is not incidental. Without it,
  * evaluating two models on the same page returns the first one's result twice
  * and the comparison silently measures nothing. The prompt version is in there
  * for the same reason: editing the prompt and re-running would otherwise
- * compare new prompt against cached old.
+ * compare new prompt against cached old. PIPELINE_VERSION is the same argument
+ * for everything the offscreen document produces -- boxes, reading order, and
+ * the erase mask.
  */
-export function cacheKey({ contentHash, seriesId, targetLang, model, promptVersion = 1 }) {
-  return [contentHash, seriesId, targetLang, model, `p${promptVersion}`].join("|");
+export function cacheKey({
+  contentHash, seriesId, targetLang, model,
+  promptVersion = 1, pipelineVersion = PIPELINE_VERSION
+}) {
+  return [contentHash, seriesId, targetLang, model,
+          `p${promptVersion}`, `g${pipelineVersion}`].join("|");
 }
 
 function truncate(s, n = 400) {

@@ -29,7 +29,9 @@ import { deriveSeriesId } from "./lib/series.js";
 import { measureBackground, stripStats, snapFill } from "./lib/surface.js";
 import { shapeBox } from "./lib/layout.js";
 import { createBudget, DEFAULT_LIMIT } from "./lib/budget.js";
-import { diffusionInpaint } from "./lib/inpaint.js";
+import {
+  clearBox, diffusionInpaint, backgroundStructure, STRUCTURE_THRESHOLD
+} from "./lib/inpaint.js";
 
 // A RANGE, not a single id.
 //
@@ -377,12 +379,36 @@ function annotateBackgrounds(surface, page) {
   return page;
 }
 
+// Onomatopoeia is SHORT, and that is the second half of the test.
+//
+// Structure alone says "there is drawing behind this text", which is true of
+// hand-drawn SFX and also true of a narration block set across a textured
+// panel -- and those two want opposite treatment. Sparing a narration block
+// leaves a paragraph of Japanese on the page with a line of English shrunk into
+// a strip beside it, which is much worse than the ghosting that erasing it
+// would have caused.
+//
+// The length of the SOURCE separates them, and it is the same claim the old
+// rendering path made when it said SFX "is short, it sits on artwork by
+// nature". Measured on the Japanese rather than the English because the English
+// varies with how verbose a translation happens to be, and this is a question
+// about what was drawn.
+const SFX_MAX_CHARS = 12;
+
+/** Short enough, and stylised enough, to be treated as part of the drawing. */
+function isStylised(region) {
+  if (region.kind === "sfx" && region.inBubble !== true) return true;
+  const source = region.japanese ?? "";
+  return source.length > 0 && source.length <= SFX_MAX_CHARS;
+}
+
 /**
  * Attach the clean plate: the page with the glyph strokes repainted.
  *
- * The plate is built in the offscreen document on the miss path, because that
- * is where the mask comes from. This is the CACHE HIT path, and it exists
- * because a cache hit skips the offscreen document entirely.
+ * Runs on BOTH paths, cache hit and miss, and is the only place a plate is
+ * built. It lives here rather than in the offscreen document -- which is where
+ * the mask comes from and would be the obvious home -- because what may be
+ * erased depends on `kind`, and `kind` arrives with the translation.
  *
  * WHAT IS CACHED IS THE MASK, NOT THE PLATE. A plate is a full-page PNG, a few
  * hundred KB to a megabyte; the mask is one bit per pixel and mostly empty, so
@@ -390,19 +416,26 @@ function annotateBackgrounds(surface, page) {
  * between tens of megabytes of IndexedDB and hundreds. Re-running diffusion
  * costs a few hundred ms against a cached page that already costs nothing, and
  * it keeps the same shape as annotateBackgrounds: re-derive from the bytes we
- * hold rather than trust a stored rendering.
+ * hold rather than trust a stored rendering. It also means a change to the rule
+ * below takes effect on already-cached pages.
  *
- * A page cached before plates existed has no mask. It renders on the original
- * background, which is what it did before this change -- worse, not broken.
+ * A page cached before masks existed has none. Nothing is erased, every region
+ * is marked unerased, and it renders the way it did before this change --
+ * worse, not broken.
  */
 async function attachCleanPlate(surface, page) {
-  if (page.plate || !page.mask || !surface) return page;
+  const giveUp = () => {
+    page.regions.forEach((r) => { r.erased = false; });
+    return page;
+  };
+
+  if (!page.mask || !surface) return giveUp();
 
   let bmp;
   try {
     bmp = await createImageBitmap(new Blob([base64ToBytes(page.mask)], { type: "image/png" }));
   } catch {
-    return page;
+    return giveUp();
   }
 
   const { width, height } = surface;
@@ -411,7 +444,7 @@ async function attachCleanPlate(surface, page) {
   // rendering artefact rather than like a bug.
   if (bmp.width !== width || bmp.height !== height) {
     bmp.close?.();
-    return page;
+    return giveUp();
   }
 
   const maskCanvas = new OffscreenCanvas(width, height);
@@ -424,6 +457,46 @@ async function attachCleanPlate(surface, page) {
   for (let i = 0, q = 0; q < mask.length; i += 4, q++) mask[q] = maskData[i] > 127 ? 1 : 0;
 
   const raster = { width, height, data: surface.ctx.getImageData(0, 0, width, height).data };
+
+  // WHAT MAY BE ERASED, decided per region, and it is not a question about
+  // bubbles or about kind.
+  //
+  // Diffusion fills a masked pixel from its unmasked neighbours, so it tells
+  // the truth exactly when those neighbours are flat: a bubble interior, a
+  // tone, a gradient. Hand-drawn onomatopoeia is the opposite case -- strokes
+  // that ARE the drawing, crossing a face or a hand or a black speed-line
+  // burst. There is no "behind" to recover, so the fill is a smear, and unlike
+  // dialogue the English does not cover the damage: "GRRRR..." is a fraction of
+  // the size of the ガリガリ it replaced. The result is a panel with its
+  // artwork rubbed out and a small caption floating over the hole.
+  //
+  // The obvious test was `kind === "sfx"`, and it does not work: `kind` comes
+  // from the model, mergeRegions defaults it to "bubble" for every region the
+  // model did not answer for, and in practice whole pages of SFX come back
+  // labelled "bubble". It survives inside isStylised, because when the model
+  // does say sfx it is worth believing, but it cannot be the primary signal.
+  //
+  // So a region is spared only if BOTH hold: it is short enough to be
+  // onomatopoeia (isStylised) and there is genuinely drawing behind it
+  // (backgroundStructure, in lib/inpaint.js). Either alone over-fires --
+  // structure alone spares narration set on a textured panel, length alone
+  // spares every one-word bubble on the page.
+  //
+  // The exclusions are punched out of the mask here rather than left out of it
+  // in the offscreen document, so this rule can be re-tuned without re-running
+  // detection, and takes effect on already-cached pages.
+  page.regions.forEach((r) => {
+    const b = r.box ?? boundsOf(r.polygon);
+    const box = {
+      x0: b.x * width, y0: b.y * height,
+      x1: (b.x + b.w) * width, y1: (b.y + b.h) * height
+    };
+    const structure = backgroundStructure(raster, mask, box);
+    r.structure = +structure.toFixed(3);        // surfaced in the debug table
+    r.erased = !(isStylised(r) && structure >= STRUCTURE_THRESHOLD);
+    if (!r.erased) clearBox(mask, width, height, box);
+  });
+
   const clean = diffusionInpaint(raster, mask);
 
   const canvas = new OffscreenCanvas(width, height);
@@ -431,6 +504,14 @@ async function attachCleanPlate(surface, page) {
   const blob = await canvas.convertToBlob({ type: "image/png" });
   page.plate = bytesToBase64(await blob.arrayBuffer());
   return page;
+}
+
+/** Normalised bounding box of a polygon, for regions with no shaped box. */
+function boundsOf(polygon) {
+  const xs = polygon.map((p) => p[0]);
+  const ys = polygon.map((p) => p[1]);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
 }
 
 // --- the spend ceiling -----------------------------------------------------
@@ -585,7 +666,8 @@ async function translate(ctx) {
     glossaryVersion: 0
   };
 
-  annotateBackgrounds(await decodePage(buffer), page);
+  const surface = await decodePage(buffer);
+  annotateBackgrounds(surface, page);
 
   // Fire and forget. Caching is a side effect of translating, not part of
   // delivering the result, and awaiting it once made a cache bug indistinguish-
@@ -599,7 +681,7 @@ async function translate(ctx) {
   // would pick up whatever the object holds by then. Copying here pins what
   // gets stored to what exists now.
   void cacheSet(key, { ...page }).catch(() => {});
-  page.plate = prepared.plate;
+  await attachCleanPlate(surface, page);
 
   return {
     page, strategy, tried, cached: false,

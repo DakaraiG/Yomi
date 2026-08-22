@@ -220,6 +220,10 @@
     console.table(
       page.regions.map((r) => ({
         order: r.order, kind: r.kind, bubble: r.inBubble,
+        // Why this region was or was not erased: `structure` is how much
+        // drawing sits behind its text, and anything at or above the threshold
+        // in lib/inpaint.js is left alone.
+        erased: r.erased, structure: r.structure,
         lum: r.bgLum, sd: r.bgStd, share: r.bgShare, peak: r.bgPeak,
         fill: r.fill ? `rgb(${r.fill.join(",")})` : "—",
         dark: r.darkBg,

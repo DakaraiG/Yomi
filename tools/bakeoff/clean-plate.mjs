@@ -24,11 +24,12 @@ import { fileURLToPath } from "node:url";
 import { loadRaster } from "./lib/image.mjs";
 import { modelPath } from "./fetch-models.mjs";
 import {
-  CTD_SIZE, letterbox, cropChannel, resizeMap
+  CTD_SIZE, letterbox, cropChannel, resizeMap, decodeBlocks, fuse
 } from "../../extension/lib/ctd-postprocess.js";
 import { toTensor } from "../../extension/lib/imageops.js";
 import {
-  textMask, diffusionInpaint, maskCoverage
+  textMask, restrictToBoxes, diffusionInpaint, maskCoverage,
+  backgroundStructure, STRUCTURE_THRESHOLD, clearBox
 } from "../../extension/lib/inpaint.js";
 import { groupIntoBlocks } from "../../extension/lib/group.js";
 import { probabilityMapToBoxes } from "./lib/db-postprocess.mjs";
@@ -61,7 +62,6 @@ async function main() {
   const ort = (await import("onnxruntime-node")).default;
   const session = await ort.InferenceSession.create(modelPath("ctd"));
   const [blkName, segName, detName] = session.outputNames;
-  void blkName;
 
   await mkdir(OUT_DIR, { recursive: true });
   const wanted = process.argv.slice(2);
@@ -73,7 +73,7 @@ async function main() {
   for (const page of pages) {
     const raster = await loadRaster(join(PAGES_DIR, page));
     const { width, height } = raster;
-    const { raster: lb, nw, nh } = letterbox(raster);
+    const { raster: lb, r, nw, nh } = letterbox(raster);
 
     const tensor = new ort.Tensor("float32", toTensor(lb), [1, 3, CTD_SIZE, CTD_SIZE]);
     const result = await session.run({ [session.inputNames[0]]: tensor });
@@ -81,28 +81,61 @@ async function main() {
     const seg = resizeMap(
       cropChannel(result[segName].data, { size: CTD_SIZE, nw, nh }), nw, nh, width, height);
 
-    const t0 = performance.now();
-    const mask = textMask(seg, width, height);
-    const maskMs = Math.round(performance.now() - t0);
-
-    let on = 0;
-    for (let i = 0; i < mask.length; i++) on += mask[i];
-
-    const t1 = performance.now();
-    const plate = diffusionInpaint(raster, mask);
-    const inpaintMs = Math.round(performance.now() - t1);
-
-    // Per-region coverage, which is the number the ".outlined fallback for
-    // regions the mask swallows" decision hangs on.
+    // Regions first: the mask is confined to them, so they are an input to it
+    // rather than something measured afterwards.
     const lineMap = cropChannel(result[detName].data, { size: CTD_SIZE, nw, nh, channel: 0 });
     const lines = probabilityMapToBoxes(lineMap, {
       width: nw, height: nh, scaleX: width / nw, scaleY: height / nh,
       imageWidth: width, imageHeight: height
     });
-    const blocks = groupIntoBlocks(raster, lines);
-    const coverage = blocks
-      .map((b) => ({ cov: maskCoverage(mask, width, b), b }))
-      .sort((a, z) => z.cov - a.cov);
+    // FUSED, exactly as lib/detect.js returns it. Grouping the det lines alone
+    // is a different region set -- it misses whatever only the YOLO head found,
+    // which on ynko.jpg is the 394mg logo. Get this wrong and the tool draws a
+    // plate the extension will never produce, and the difference lands on
+    // precisely the regions this change is about.
+    const blk = result[blkName];
+    const blocks = groupIntoBlocks(raster, fuse(lines, decodeBlocks(blk.data, {
+      stride: blk.dims[2], count: blk.dims[1], r, width, height
+    })));
+
+    const t0 = performance.now();
+    const full = textMask(seg, width, height);
+    let everything = 0;
+    for (let i = 0; i < full.length; i++) everything += full[i];
+    const mask = restrictToBoxes(full, width, height, blocks);
+    const maskMs = Math.round(performance.now() - t0);
+
+    let on = 0;
+    for (let i = 0; i < mask.length; i++) on += mask[i];
+
+    // Per-region structure: the number that decides whether erasing this
+    // region repairs it or rubs the drawing out. Printed rather than acted on,
+    // because the threshold has to be chosen by looking at both the number and
+    // the picture.
+    const measured = blocks.map((b) => ({
+      b,
+      cov: maskCoverage(mask, width, b),
+      structure: backgroundStructure(raster, mask, b),
+      inBubble: b.inBubble === true
+    })).sort((a, z) => z.structure - a.structure);
+
+    // HALF the exclusion the service worker applies. The worker spares a region
+    // only if it is short enough to be onomatopoeia AND has drawing behind it;
+    // both halves of the first test need the translation, and there is no model
+    // call here, so this is the structure test alone. Expect this tool to spare
+    // MORE than the extension does -- a long narration block on a busy panel
+    // shows up as KEPT here and is erased in the product.
+    let kept = 0;
+    for (const m of measured) {
+      if (m.structure < STRUCTURE_THRESHOLD) continue;
+      clearBox(mask, width, height, m.b);
+      kept++;
+    }
+
+    const t1 = performance.now();
+    const plate = diffusionInpaint(raster, mask);
+    const inpaintMs = Math.round(performance.now() - t1);
+
 
     const stem = basename(page, extname(page));
     await writeFile(join(OUT_DIR, `${stem}.plate.png`), rasterToPng(plate));
@@ -110,11 +143,17 @@ async function main() {
 
     console.log(
       `${page.padEnd(12)} ${width}x${height}  mask ${(on / mask.length * 100).toFixed(1)}% ` +
-      `(${maskMs}ms)  inpaint ${inpaintMs}ms  ${blocks.length} regions`);
-    console.log(
-      `  region mask coverage, highest first: ` +
-      coverage.slice(0, 6).map((c) => c.cov.toFixed(2)).join(" ") +
-      `  ... median ${coverage[Math.floor(coverage.length / 2)].cov.toFixed(2)}`);
+      `of the page, ${(on / everything * 100).toFixed(0)}% of the text found ` +
+      `(${maskMs}ms)  inpaint ${inpaintMs}ms  ${blocks.length} regions, ` +
+      `${kept} left alone`);
+    for (const m of measured) {
+      console.log(
+        `    ${m.structure >= STRUCTURE_THRESHOLD ? "KEPT " : "erase"} ` +
+        `${m.structure.toFixed(3)} structure  ${m.cov.toFixed(2)} covered  ` +
+        `${m.inBubble ? "in bubble    " : "no bubble    "}` +
+        `${Math.round(m.b.x0)},${Math.round(m.b.y0)} ` +
+        `${Math.round(m.b.x1 - m.b.x0)}x${Math.round(m.b.y1 - m.b.y0)}`);
+    }
   }
   console.log(`\nplates + masks in ${OUT_DIR}\nNOW LOOK AT THEM.`);
 }
