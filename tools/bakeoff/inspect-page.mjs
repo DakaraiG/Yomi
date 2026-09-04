@@ -94,9 +94,8 @@ ordered.forEach((b, i) => {
 
 console.table(rows);
 const texCount = rows.filter((r) => r.tex).length;
-// Both render the same way now -- the clean plate repairs the background either
-// way -- so this counts what the enclosure test found, which is still what
-// decides how far lib/layout.js may widen a box.
+// Counts what the enclosure test found, which is what decides how far
+// lib/layout.js may widen a box.
 console.log(`${rows.length} regions — ${texCount} with no drawn bubble, ` +
             `${rows.length - texCount} inside one`);
 console.log(`peak range ${Math.min(...rows.map(r => r.peak))} .. ` +

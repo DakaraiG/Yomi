@@ -70,10 +70,9 @@ for (const [name, page] of Object.entries(baseline.pages)) {
     if (nw > w + 0.5) grew++;
     before.push(w / h); after.push(nw / h);
 
-    // THE SAFETY CHECK. Widening is only allowed to stay on the surface it
-    // started on, so re-measuring the grown box must not show it drifting in
-    // colour or picking up the variance of artwork. Anything flagged here is
-    // the probe having walked off a bubble.
+    // Widening may only stay on the surface it started on, so a grown box that
+    // has drifted in colour or picked up the variance of artwork is the probe
+    // having walked off a bubble.
     const grownPx = crop(raster, out.x0, out.y0, nw, h);
     const after2 = grownPx ? measureBackground(grownPx) : base;
     const drift = Math.abs(after2.bgLum - base.bgLum);
@@ -106,9 +105,9 @@ console.log(leaked.length
   ? `LEAKED off-surface: ${leaked.join(", ")}`
   : "no region leaked off its surface");
 
-// Visual check: original box in red, widened box in green. The measurement
-// above proves the grown box is still one uniform surface; only the eye can
-// say whether it is still INSIDE the bubble.
+// Original box in red, widened box in green. The measurement above proves the
+// grown box is one uniform surface; only the eye can say it is still inside the
+// bubble.
 if (process.argv.includes("--render")) {
   const { createCanvas, loadImage } = await import("@napi-rs/canvas");
   const { writeFile } = await import("node:fs/promises");

@@ -1,82 +1,62 @@
-// Group text LINES into text BLOCKS.
+// Group text lines into text blocks.
 //
-// This step did not exist in v0.3 and is the main thing the rewrite has to
-// invent. comic-text-detector returned one box per text block; every MIT/Apache
-// replacement returns one box per line, because they are general text detectors
-// and a line is what general text is made of. A bubble holding three vertical
-// columns arrives as three boxes.
+// The detectors available under MIT/Apache are general text detectors, so they
+// return one box per line where comic-text-detector returned one per block: a
+// bubble holding three vertical columns arrives as three boxes. Downstream needs
+// blocks -- the overlay draws one English string per bubble, and the numbered
+// handoff gives the model one number per region, so three numbers on one bubble
+// means three fragments of a sentence translated independently.
 //
-// Blocks matter downstream in a way lines do not: the overlay draws one English
-// string per bubble, and Phase 3's numbered handoff gives the model one number
-// per region. Three numbers on one bubble means three fragments of a sentence
-// translated independently.
+// Proximity alone cannot do it. Grow each box and merge what overlaps, and the
+// result chains: A near B near C welds a margin sidebar to a bubble two panels
+// away because a run of small SFX bridged the gap. That is what transitive
+// closure over a proximity graph does on a dense page, not a tuning problem.
 //
-// WHY PROXIMITY ALONE FAILS. The obvious rule -- grow each box a little, merge
-// what overlaps -- chains. A is near B, B is near C, C is near D, and a single
-// pass welds a margin sidebar to a speech bubble two panels away because a run
-// of small SFX happened to bridge the gap. That is not a tuning problem; it is
-// what transitive closure over a proximity graph does on a dense page.
+// So structure decides first, from two signals already computed elsewhere:
 //
-// So grouping here is driven by STRUCTURE first and geometry only as a
-// fallback, using two signals that cost nothing because we already compute them:
+//   1. Panels. Two lines in different panels are never the same region,
+//      whatever their geometry says -- a hard partition that alone kills the
+//      worst over-merges.
+//   2. Bubbles. A speech bubble is a closed light region bounded by a dark
+//      contour, so lines sharing an enclosure are candidates to merge.
 //
-//   1. PANELS (lib/panels.js). Two lines in different panels are never the same
-//      region, whatever their geometry says. This is a hard partition and it
-//      alone kills the worst over-merges.
-//   2. BUBBLES. A speech bubble is a closed light region bounded by a dark
-//      contour -- the same observation the classical detector candidate rests
-//      on. Lines sharing an enclosing bubble are the same block, full stop, and
-//      no gap heuristic is consulted.
-//
-// Geometry is used only for text with no bubble around it: SFX and narration
-// set over artwork. There it is orientation-aware and tight, and it still
-// cannot cross a panel boundary.
+// Geometry runs inside a structural bucket and never across one. For text with
+// no bubble -- SFX and narration over artwork -- it is the only signal left.
 
 import { WhiteField, WHITE_LEVEL } from "./panels.js";
 import { detectPages } from "./panels.js";
 import { panelIndexFor } from "./ordering.js";
 
-// Bubble-interior detection. Looser than the classical DETECTOR's filters,
-// because the job is different: we are not trying to find text, only to decide
-// whether two boxes sit inside the same enclosure. A blob that is a bad text
-// region can still be a perfectly good grouping key.
+// Looser than the classical detector's filters, because the job is only to
+// decide whether two boxes sit in the same enclosure: a blob that is a bad text
+// region can still be a good grouping key.
 const MIN_BUBBLE_AREA_FRACTION = 0.0002;
 const MAX_BUBBLE_AREA_FRACTION = 0.35;
 
 // On-art fallback. Vertical Japanese sets columns about one character apart, so
 // the gap that still counts as "same block" scales with the column's short side.
 const ADJACENT_GAP_RATIO = 0.9;
-// Inside a shared bubble the same test runs looser: enclosure has already ruled
-// out everything structurally unrelated, so the only question left is whether
-// this is one bubble or two touching ones.
+// Inside a shared bubble the same test runs looser, since enclosure has already
+// ruled out everything structurally unrelated and the only question left is one
+// bubble or two touching ones.
 //
-// SWEPT, not guessed, and it is a genuine trade-off rather than a value that
-// wants tuning further. Low settings separate ynko3's touching double bubble
-// correctly and then over-split ordinary bubbles on ynko2; high settings do the
-// reverse. Measured across the three pages (exact-match rate):
-//
-//   0.3-0.5   100.0 / 84.6 / 100.0     ynko3 right, ynko2 splits 4 bubbles
-//   0.9       100.0 / 92.3 /  90.9
-//   1.2-1.6   100.0 / 96.2 /  90.9     best aggregate, one weld left
-//
-// No value fixes both, because gap size is not what separates the two cases: a
-// double bubble's lobes are 28px apart, which is also a plausible column gap.
-// The discriminator that would work is alignment -- columns of one text block
-// share y extents almost exactly, while two bubbles' columns do not -- but
-// fitting a second heuristic to two remaining errors across three pages is
-// overfitting, not engineering. Revisit with more pages.
+// A swept trade-off with no correct answer: low settings separate a touching
+// double bubble and over-split ordinary ones, high settings do the reverse. Gap
+// size cannot separate the two cases -- a double bubble's lobes sit about one
+// column-gap apart. Alignment would (columns of one block share y extents almost
+// exactly), but fitting a second heuristic to two errors across three pages is
+// overfitting. Revisit with more pages.
 const BUBBLE_GAP_RATIO = 1.2;
-// Two columns of the same block run alongside each other; this is how much they
-// must overlap on the long axis to count as neighbours rather than as unrelated
-// text that happens to pass nearby.
+// How far two boxes must overlap on their long axis to be columns of one block
+// rather than unrelated text passing nearby.
 const MIN_PARALLEL_OVERLAP = 0.35;
 
 /**
  * Label every enclosed light region.
  *
- * The enclosure does the work for free: flood the light pixels and the page
- * margin is one component, each bubble interior is another, because the drawn
- * outline severs them. The margin is the component touching the image edge.
+ * Flooding the light pixels does the work: the drawn outline severs each bubble
+ * interior from the page margin, and the margin is the component touching the
+ * image edge.
  *
  * @returns {{labels: Int32Array, width: number, height: number}} 0 = not inside
  *   any bubble.
@@ -93,13 +73,11 @@ export function bubbleMap(raster, field = null) {
   const edged = [];
   let next = 1;
 
-  // Label EVERY light component first, then decide which are bubbles and remap.
-  //
-  // The obvious shape -- flood, judge, and zero the labels again if it is not a
-  // bubble -- is quadratic, and lethally so. Zeroing puts those pixels back in
-  // the "unvisited" state the outer scan tests for, so the page margin (the
-  // largest component on every page, and never a bubble) gets re-flooded from
-  // each of its own pixels in turn.
+  // Label every light component first, then decide which are bubbles and remap.
+  // Zeroing a rejected component's labels instead would put its pixels back in
+  // the unvisited state this scan tests for, so the page margin -- the largest
+  // component on every page, and never a bubble -- gets re-flooded from each of
+  // its own pixels in turn.
   for (let seed = 0; seed < mask.length; seed++) {
     if (!mask[seed] || labels[seed]) continue;
 
@@ -146,9 +124,9 @@ export function bubbleMap(raster, field = null) {
 /**
  * Which bubble encloses this box, or 0.
  *
- * Sampled over the box rather than at its centre. The centre of a text line
- * lands on a glyph as often as not, and a glyph is ink -- label 0 -- so a
- * centre probe reports "no bubble" for text that is plainly inside one.
+ * Sampled over the box, not at its centre: the centre of a text line lands on a
+ * glyph as often as not, and a glyph is ink -- label 0 -- so a centre probe
+ * reports "no bubble" for text plainly inside one.
  */
 function enclosingBubble({ labels, width, height }, box) {
   const x0 = Math.max(0, Math.floor(box.x0));
@@ -174,22 +152,16 @@ function enclosingBubble({ labels, width, height }, box) {
   let best = 0, bestCount = 0;
   for (const [id, n] of counts) if (n > bestCount) { best = id; bestCount = n; }
 
-  // Require the winner to actually ENCLOSE the line, not merely touch it.
+  // The winner must enclose the line, not merely touch it. Measured over 222
+  // lines on the fixture pages the score is sharply bimodal -- 0.6-0.9 inside a
+  // bubble, 0.0-0.5 on art -- and the threshold belongs in the empty valley
+  // between.
   //
-  // Measured over 222 detected lines across the four fixture pages, this is
-  // sharply bimodal: text genuinely inside a bubble scores 0.6-0.9 (172 lines,
-  // peaking at 0.7-0.8), while on-art text scores 0.0-0.5 (42 lines), with a
-  // near-empty valley between. The threshold belongs in that valley.
-  //
-  // It used to be 0.25, which is deep inside the noise, and the cost was not a
-  // few odd groupings -- it was structural. A screentone panel breaks into a
-  // scatter of small light blobs, and at 0.25 each column of thought text
-  // claimed a different blob as its "bubble". Bucketing happens by bubble id
-  // BEFORE any geometry is considered, so those columns could never merge no
-  // matter how plainly adjacent they were: on ynko4's grey band, eleven of the
-  // fourteen neighbouring pairs pass the adjacency test and none of them were
-  // ever asked. Text with no bubble has to fall through to geometry, and that
-  // only happens when it reports no bubble.
+  // Set low, this fails structurally rather than cosmetically: a screentone
+  // panel breaks into a scatter of small light blobs, each column of thought
+  // text claims a different one, and since bucketing happens by bubble id before
+  // any geometry is considered, plainly adjacent columns are never even asked.
+  // Text with no bubble has to report no bubble to reach the geometry fallback.
   const ENCLOSURE = 0.55;
   return sampled && bestCount / sampled >= ENCLOSURE ? best : 0;
 }
@@ -239,8 +211,8 @@ function mergeByAdjacency(boxes, indices, gapRatio = ADJACENT_GAP_RATIO) {
       continue;
     }
 
-    // Joining two existing groups at once is legitimate -- a line can bridge
-    // them -- so fold them together rather than picking one.
+    // A line can bridge two existing groups, so fold them together rather than
+    // picking one.
     const target = groups[hits[0]];
     target.box = union(target.box, box);
     target.members.push(i);
@@ -267,8 +239,8 @@ export function groupIntoBlocks(raster, lines) {
   const pages = detectPages(field);
   const bubbles = bubbleMap(raster, field);
 
-  // Bucket by structure: page, then panel (or "furniture"), then bubble.
-  // Anything landing in a different bucket cannot merge, full stop.
+  // Bucket by structure -- page, then panel or furniture strip, then bubble.
+  // Lines in different buckets can never merge.
   const buckets = new Map();
 
   lines.forEach((line, i) => {
@@ -285,17 +257,16 @@ export function groupIntoBlocks(raster, lines) {
     } else {
       const [bx0, by0, bx1, by1] = page.block;
       if (cx < bx0 || cx > bx1) {
-        // Beside the panels. Key by which furniture STRIP it falls in, not by a
-        // single "furniture" bucket: two commentary columns 3px apart are two
-        // regions, and no gap threshold can say so -- real column spacing
-        // inside one block is just as tight. The strips already know, because
-        // a full-height white column is exactly what separates them.
+        // Beside the panels, keyed by which furniture strip rather than one
+        // shared bucket: two commentary columns 3px apart are two regions, and
+        // no gap threshold can say so, since column spacing inside one block is
+        // just as tight. The strips already know.
         const strip = page.furniture.findIndex(
           ([fx0, fy0, fx1, fy1]) => fx0 <= cx && cx < fx1 && fy0 <= cy && cy < fy1);
         where = strip === -1 ? "aside" : `f${strip}`;
       } else if (cy < by0) {
-        // Above the panels: a page title. Kept apart from the side furniture,
-        // which it would otherwise chain into along the margin.
+        // A page title, kept apart from the side furniture it would otherwise
+        // chain into along the margin.
         where = "above";
       } else if (cy > by1) {
         where = "below";
@@ -312,22 +283,16 @@ export function groupIntoBlocks(raster, lines) {
 
   const blocks = [];
   for (const { bubble, indices } of buckets.values()) {
-    // Inside one bubble, geometry is still consulted -- just generously. Manga
-    // draws double bubbles whose outlines touch, and a touching pair is ONE
-    // light region however plainly it reads as two utterances (ynko3's
-    // "俺だってやりたくねえけど" and "金が無い以上..." are one blob, id 33).
-    // Enclosure therefore constrains rather than decides: it says what CANNOT
-    // merge, and the loose gap test separates lobes while still joining the
-    // columns of an ordinary bubble, whose spacing is about one character.
+    // Enclosure constrains rather than decides: manga draws double bubbles whose
+    // outlines touch, and a touching pair is one light region however plainly it
+    // reads as two utterances. So geometry still runs inside a bubble, loosely
+    // enough to join the columns of an ordinary one.
     const gapRatio = bubble !== 0 ? BUBBLE_GAP_RATIO : ADJACENT_GAP_RATIO;
     for (const group of mergeByAdjacency(lines, indices, gapRatio)) {
-      // Carried out with the block, not just used for bucketing. Whether a
-      // region sits inside a drawn bubble is the one thing that decides
-      // whether the overlay may paint a box, and it cannot be recovered
+      // `inBubble` is carried out with the block because it cannot be recovered
       // downstream: text on a blank area of a page is pixel-for-pixel
-      // indistinguishable from text in a bubble, because both are uniformly
-      // light. Only the connected-component pass knows there is no outline
-      // around it.
+      // indistinguishable from text in a bubble, both being uniformly light.
+      // Only the connected-component pass knows there is no outline around it.
       blocks.push({ ...group.box, members: group.members, inBubble: bubble !== 0 });
     }
   }

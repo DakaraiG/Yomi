@@ -63,7 +63,7 @@ for (let i = 0; i < lines.length - 1; i++) {
     allowed: Math.round(allowGap),
     "gap?": gapOk,
     merges: overlapOk && gapOk,
-    // What ratio WOULD have been needed for each term to pass.
+    // The ratio each term would have needed to pass.
     ovlNeeded: +(yOverlap / Math.min(ah, bh)).toFixed(2),
     gapNeeded: +(xGap / Math.min(aw, bw)).toFixed(2)
   });
@@ -76,8 +76,8 @@ console.log(`  blocked by overlap only: ${blocked.filter(r => !r["overlap?"] && 
 console.log(`  blocked by gap only:     ${blocked.filter(r => r["overlap?"] && !r["gap?"]).length}`);
 console.log(`  blocked by both:         ${blocked.filter(r => !r["overlap?"] && !r["gap?"]).length}`);
 
-// Which bubble bucket does each line land in? Two lines in different buckets
-// cannot merge however adjacent they are -- the bucket is checked first.
+// Two lines in different bubble buckets cannot merge however adjacent they are:
+// the bucket is checked first.
 const { bubbleMap, WHITE_LEVEL } = await import("../../extension/lib/group.js");
 const bubbles = bubbleMap(raster);
 function bucketOf(box) {

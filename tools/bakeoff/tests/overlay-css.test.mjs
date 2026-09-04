@@ -1,11 +1,8 @@
-// The overlay's stylesheet is a template literal full of prose comments, and
-// prose about CSS wants to name selectors. A backtick in one of those comments
-// closes the template early -- and the result is still VALID JavaScript, so
-// `node --check` passes: the string is followed by another template literal,
-// which parses as a tagged template call and throws "... is not a function" at
-// load time, with the entire stylesheet quoted in the error.
-//
-// That cost a debugging round. This is a syntax check the syntax checker
+// The overlay's stylesheet is a template literal with comments in it, and a
+// backtick in one closes the template early. The result is still valid
+// JavaScript, so `node --check` passes: the string is followed by another
+// template literal, which parses as a tagged template call and throws "... is
+// not a function" at load time. This is the syntax check the syntax checker
 // cannot do.
 
 import { test } from "node:test";

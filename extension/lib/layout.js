@@ -1,23 +1,18 @@
 // Box shaping: giving English a shape it can be set in.
 //
-// Japanese sets vertically, so a region's box is tall and narrow. English
+// Japanese sets vertically, so a region's box is tall and narrow, and English
 // inherits that shape and wraps into eight-line slivers where a letterer would
-// use four wider lines. It is the most obvious machine-made tell left.
+// use four wider lines.
 //
-// WIDTH IS THE ONLY LEVER. The tempting alternative -- trade height for width
-// around the centre, preserving area -- cannot work here: the fill has to cover
-// the original Japanese, so any box shorter than the region leaves Japanese
-// showing below the English, which is the exact defect Task 1 existed to fix.
-// Shortening the text box while keeping the fill tall does not help either,
-// since the text box is already as wide as the fill. So: widen, or accept.
+// Width is the only lever -- trading height for width around the centre would
+// leave the original Japanese showing below the English.
 //
-// WHAT BOUNDS THE WIDTH is not other text boxes. Measured on the fixture pages,
-// the span between neighbouring regions is a median of 5.3x the box width --
-// that space is artwork, not emptiness, and expanding into it would run bubble
-// text across a panel. The real boundary is the bubble the text sits in, and
-// the surface measurement from lib/surface.js finds it: step outward while the
-// pixels are still the same uniform surface, and stop when they are not. The
-// probe is the safety, which is why the growth cap can afford to be loose.
+// What bounds the width is not the other text boxes: the span between
+// neighbouring regions is a median of 5.3x the box width on the fixture pages,
+// and that space is artwork rather than emptiness. The real boundary is the
+// bubble, which lib/surface.js finds by stepping outward while the pixels are
+// still the same uniform surface. That probe is the safety, which is why the
+// growth cap can afford to be loose.
 
 /** Aspect (w/h) English wants. Slightly wider than tall: a lettered text block. */
 export const TARGET_ASPECT = 1.1;
@@ -56,9 +51,8 @@ export function sameSurface(strip, base) {
  * Widen a vertical-source box until the pixels beside it stop being the same
  * surface, it meets a neighbour, or it is wide enough for English.
  *
- * Grows a step at a time from whichever side is currently narrower, so the text
- * stays centred on the original -- a letterer centres in the bubble, and an
- * off-centre block reads as a mistake even when it is legible.
+ * Grows from whichever side is currently narrower, so the text stays centred on
+ * the original: an off-centre block reads as a mistake even when it is legible.
  *
  * @param {{x0:number,y0:number,x1:number,y1:number}} box Pixel space.
  * @param {object} o
@@ -83,7 +77,6 @@ export function widenBox(box, { base, neighbours, imageW, probe }) {
   let openL = true, openR = true;
 
   while ((openL || openR) && x1 - x0 < limit) {
-    // Whichever side has grown less, so growth stays balanced about the centre.
     const takeLeft = openL && (!openR || (box.x0 - x0) <= (x1 - box.x1));
     const room = limit - (x1 - x0);
     const d = Math.min(step, room);
@@ -104,16 +97,15 @@ export function widenBox(box, { base, neighbours, imageW, probe }) {
 }
 
 /**
- * The detector returns the TEXT, not the bubble, and bubbles are bigger than
- * the text in them -- so a little of that margin is spent giving English room.
+ * The detector returns the text, not the bubble, so a little of the bubble's
+ * margin is spent giving English room.
  */
 export const BOX_EXPAND = 0.08;
 
 /**
  * Expand each side by up to dx/dy, taking only the sides whose new strip is
- * still the same surface. Every edge of the final box is probed, which is what
- * lets the overlay fill the rect to its edges instead of fading out early and
- * hoping. An unprobed expansion is a guess, and a guess has to be hidden.
+ * still the same surface. Every edge of the final box has been probed, so the
+ * overlay can use the rect to its edges rather than hedging.
  */
 function grow(b, dx, dy, { base, probe, imageW, imageH }) {
   let { x0, y0, x1, y1 } = b;
@@ -137,10 +129,8 @@ function grow(b, dx, dy, { base, probe, imageW, imageH }) {
  * Final layout rect for one region, in pixels.
  *
  * Every pixel of what comes back has been measured as the same surface the
- * region sits on, so the overlay can cover it exactly.
- *
- * A vertical region's width is set by the probe and is not inflated again: the
- * probe already refused whatever lies past its edge.
+ * region sits on. A vertical region's width is not inflated again afterwards:
+ * the probe already refused whatever lies past its edge.
  */
 export function shapeBox(box, { vertical, base, neighbours, imageW, imageH, probe }) {
   const opts = { base, probe, imageW, imageH };

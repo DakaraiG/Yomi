@@ -1,14 +1,9 @@
-// Connected components on a binary mask.
+// Connected components on a binary mask, the one primitive DB post-processing,
+// the classical detector and the panel segmentation all reduce to. Hand-rolled
+// because opencv.js is a multi-megabyte wasm blob to ship for it.
 //
-// Hand-rolled rather than pulled from OpenCV, for two reasons. opencv.js is a
-// multi-megabyte wasm blob that would have to ship inside the extension, and
-// this is the one primitive every part of the new pipeline needs: DB
-// post-processing, the classical detector candidate, and the panel port all
-// reduce to "find the blobs, then measure them".
-//
-// Iterative flood fill with an explicit stack. Recursion blows the JS stack on
-// a full-page component at manga resolutions -- a 2000x3000 page has single
-// components of several hundred thousand pixels.
+// Flood fill is iterative with an explicit stack: recursion blows the JS stack
+// on a full-page component, which runs to hundreds of thousands of pixels.
 
 /**
  * @param {Uint8Array} mask   1 = foreground, 0 = background
@@ -48,8 +43,8 @@ export function connectedComponents(mask, width, height, { eightWay = false } = 
       if (y >= y1) y1 = y + 1;
       if (x === 0 || y === 0 || x === width - 1 || y === height - 1) touchesEdge = true;
 
-      // Bounds are checked per neighbour rather than by padding the mask: the
-      // masks here are page-sized and a padded copy is a real allocation.
+      // Bounds checked per neighbour rather than by padding the mask, which at
+      // page size is a real allocation.
       if (x > 0 && mask[p - 1] && !labels[p - 1]) { labels[p - 1] = id; stack[sp++] = p - 1; }
       if (x < width - 1 && mask[p + 1] && !labels[p + 1]) { labels[p + 1] = id; stack[sp++] = p + 1; }
       if (y > 0 && mask[p - width] && !labels[p - width]) { labels[p - width] = id; stack[sp++] = p - width; }
@@ -75,8 +70,7 @@ export function connectedComponents(mask, width, height, { eightWay = false } = 
 export function dilate(mask, width, height, radius = 1) {
   if (radius <= 0) return mask;
 
-  // Separable: horizontal pass then vertical pass. O(n * r) instead of
-  // O(n * r^2), which matters at page resolution.
+  // Separable, so O(n * r) rather than O(n * r^2).
   const tmp = new Uint8Array(mask.length);
   for (let y = 0; y < height; y++) {
     const row = y * width;

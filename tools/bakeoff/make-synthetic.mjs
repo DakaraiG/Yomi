@@ -1,10 +1,9 @@
 // Generate a synthetic manga-ish page.
 //
-// NOT a substitute for real fixtures -- it has none of what makes manga hard
-// (screentone, stylised lettering, art that looks like text). It exists so the
-// harness itself can be proven to run end to end before Dak's pages arrive, and
-// so a regression in the plumbing is distinguishable from a regression in a
-// detector.
+// Not a substitute for real fixtures: it has none of what makes manga hard
+// (screentone, stylised lettering, art that looks like text). It exists to prove
+// the harness runs end to end, so a regression in the plumbing stays
+// distinguishable from a regression in a detector.
 //
 //   node make-synthetic.mjs [out.png]
 

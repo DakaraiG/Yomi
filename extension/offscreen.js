@@ -1,15 +1,13 @@
 // Offscreen document: detection, grouping, ordering, and the numbered render.
 //
-// Everything from image bytes to "the picture we send the model" happens here,
-// in one place, for one reason: it all needs the model session, and the model
-// session is expensive to create (a second or two) and must survive between
-// pages. The service worker cannot hold it -- it gets killed on idle -- so the
-// worker stays a thin router and this document does the work.
+// Everything from image bytes to "the picture we send the model" lives here
+// because it all needs the model session, which takes a second or two to create
+// and must survive between pages. The service worker is killed on idle and
+// cannot hold it.
 //
-// It returns the numbered PNG, the erase mask, and the regions' geometry. The
-// service worker owns the network call, because it owns the API key and keys
-// should live in as few places as possible -- and it owns the inpainting,
-// because what may be erased depends on the answer that call comes back with.
+// Returns the numbered PNG, the erase mask, and the regions' geometry. The
+// service worker keeps the network call, because it owns the API key, and the
+// inpainting, because what may be erased depends on the answer it gets back.
 
 import { Detector } from "./lib/detect.js";
 import { rasterFromBlob } from "./lib/imageops.js";
@@ -22,10 +20,9 @@ import { base64ToBytes, bytesToBase64 } from "./lib/bytes.js";
 const detector = new Detector();
 let ready = null;
 
-// Model load is a one-off but not a small one: a 26MB WASM binary to compile
-// plus a 91MB model to parse. Generous, but bounded -- an unbounded wait is
-// indistinguishable from a hang, and that ambiguity has cost several rounds of
-// debugging already.
+// Model load is a 26MB WASM binary to compile plus a 91MB model to parse, so
+// the bound is generous -- but bounded, because an unbounded wait is
+// indistinguishable from a hang.
 const LOAD_TIMEOUT_MS = 120_000;
 const DETECT_TIMEOUT_MS = 120_000;
 
@@ -52,22 +49,19 @@ function ensureReady() {
   return ready;
 }
 
-// Debug hook. The offscreen document is otherwise unreachable from a console --
-// its DevTools window has no handle on any of this, which made every question
-// about the detector a code change and a reload.
+// Debug hook: without it, every question about the detector is a code change
+// and a reload, since this document's DevTools console has no other handle on
+// any of this.
 globalThis.__yomi = { detector, prepare: (...args) => prepare(...args) };
 
 /**
  * The erase mask: one bit per pixel, 1 where text should be repainted.
  *
- * THE PLATE IS NOT BUILT HERE, and the reason is worth stating because this is
- * the obvious place for it. Which regions may be erased depends on `kind`, and
- * `kind` comes back from the translation model -- so nothing in this document
- * knows it yet. The service worker owns the inpainting for that reason, on both
- * the cache-miss and cache-hit paths; see attachCleanPlate in background.js.
+ * The plate itself is not built here, though this is the obvious place for it:
+ * which regions may be erased depends on `kind`, which comes back from the
+ * translation model, so nothing in this document knows it yet.
  *
- * ONLY INSIDE THE REGIONS. The mask is confined to text the overlay is going to
- * write over -- see restrictToBoxes, which is where the reasoning lives.
+ * Confined to the regions the overlay will write over -- see restrictToBoxes.
  *
  * @param {{width:number,height:number,data:Uint8ClampedArray}} raster
  * @param {Float32Array} seg  page-resolution text probability
@@ -79,8 +73,8 @@ async function buildTextMask(raster, seg, regions) {
   const mask = restrictToBoxes(textMask(seg, width, height), width, height, regions);
 
   // Black and white RGBA rather than a packed bitset: PNG's filters flatten a
-  // page of solid black with thin white strokes to a few tens of KB, where the
-  // raw bits are 1 byte per 8 pixels before base64 makes them a third bigger.
+  // page of solid black with thin white strokes to a few tens of KB, well under
+  // what the raw bits cost once base64 has grown them.
   const rgba = new Uint8ClampedArray(width * height * 4);
   for (let p = 0, i = 0; p < mask.length; p++, i += 4) {
     const v = mask[p] ? 255 : 0;
@@ -98,19 +92,17 @@ async function buildTextMask(raster, seg, regions) {
  * Bytes in, numbered page and erase mask out.
  *
  * The pipeline order is load-bearing: detect gives lines, group gives regions,
- * ORDER gives them their numbers, and only then are they drawn. The label IS
+ * ordering gives them their numbers, and only then are they drawn. The label is
  * the id the model answers with and the overlay looks regions up by it, so
  * numbering before ordering would put every translation in the wrong bubble.
  *
- * The mask comes last and depends on nothing but the raster and the regions, so
- * it could equally run first; it is here so the numbered render -- the thing
- * the model is waiting on -- is not held up behind it.
+ * The mask needs only the raster and the regions, and runs last so the numbered
+ * render -- what the model is waiting on -- is not held up behind it.
  */
 async function prepare({ imageB64, mimeType }) {
-  // Stage timings, because "slow" is not a diagnosis. Detection on the CPU
-  // backend is two orders of magnitude slower than on WebGPU, and without a
-  // per-stage breakdown that is indistinguishable from a hang, a huge image, or
-  // a stuck message channel.
+  // Stage timings: the CPU backend is two orders of magnitude slower than
+  // WebGPU, which without a breakdown is indistinguishable from a hang, a huge
+  // image, or a stuck message channel.
   const marks = {};
   const clock = () => performance.now();
   let t = clock();
@@ -154,9 +146,8 @@ async function prepare({ imageB64, mimeType }) {
     numbered,
     mask,
     backend: detector.backend,
-    // Propagated rather than only logged: this document has its own console,
-    // reachable only through the extension's card in chrome://extensions, so a
-    // warning left here is a warning nobody reads.
+    // Propagated rather than only logged: this document's console is reachable
+    // only through chrome://extensions, so a warning left here is unread.
     backendWarning: detector.initWarning ?? null,
     marks,
     naturalWidth: raster.width,
@@ -174,23 +165,17 @@ async function prepare({ imageB64, mimeType }) {
         [b.x0 / raster.width, b.y1 / raster.height]
       ],
       vertical: (b.y1 - b.y0) > (b.x1 - b.x0),
-      // Whether a bubble was actually drawn around this text. No longer decides
-      // whether the background can be repaired -- the plate repairs it either
-      // way -- but still the right signal for how much room a box has to grow
-      // into, which is lib/layout.js's question.
+      // Whether a bubble was actually drawn around this text, which is how
+      // lib/layout.js knows how much room the box has to grow into.
       inBubble: b.inBubble === true
     }))
   };
 }
 
 /**
- * One detection at a time.
- *
- * There is a single ORT session and concurrent run() calls on it are not safe.
- * Now that the content script translates several pages at once, requests do
- * arrive together, so they are chained rather than left to interleave. The
- * serialisation costs nothing: detection is ~230ms against a ~15s model call,
- * so the calls still overlap where the time actually goes.
+ * One detection at a time: concurrent run() calls on a single ORT session are
+ * not safe, and the content script translates several pages at once. Costs
+ * nothing, since detection is ~230ms against a ~15s model call.
  */
 let queue = Promise.resolve();
 function serialise(task) {

@@ -1,16 +1,11 @@
 // Bake-off metrics.
 //
-// WHY NOT IoU. The obvious metric is "match each baseline box to a candidate
-// box by IoU". It is the wrong one here and would sink good candidates.
-// comic-text-detector returns one box per text BLOCK; PaddleOCR and CRAFT
-// return one per text LINE. A bubble holding three vertical columns comes back
-// as one baseline box and three candidate boxes, each with an IoU around 0.3
-// against it. By IoU that bubble looks missed. It was found perfectly.
-//
-// So recall is measured by COVERAGE: how much of the baseline box is covered
-// by the union of all candidate boxes. That is merge-independent, which keeps
-// the metric honest about detection rather than about how well the crude
-// block-merge heuristic happens to work.
+// Recall is coverage -- how much of a baseline box is covered by the union of
+// the candidate boxes -- not IoU. The baseline returns one box per text block
+// while the candidates return one per line, so a bubble of three columns scores
+// an IoU around 0.3 per box and looks missed when it was found perfectly.
+// Coverage is merge-independent, which keeps the metric about detection rather
+// than about how well the crude block-merge heuristic happens to work.
 
 /** Fraction of `target`'s area covered by the union of `boxes`. */
 export function coverageOf(target, boxes) {
@@ -18,7 +13,7 @@ export function coverageOf(target, boxes) {
   const h = Math.max(1, Math.round(target.y1 - target.y0));
   if (w * h === 0) return 0;
 
-  // Rasterising the union is exact and needs no interval algebra. Capped
+  // Rasterising the union is exact and needs no interval algebra; the capped
   // resolution keeps a full-page baseline box from allocating megapixels.
   const scale = Math.min(1, Math.sqrt(250_000 / (w * h)));
   const gw = Math.max(1, Math.round(w * scale));
@@ -28,16 +23,11 @@ export function coverageOf(target, boxes) {
   const clamp = (v, hi) => Math.max(0, Math.min(hi, v));
 
   for (const b of boxes) {
-    // Clamp BOTH ends into the grid, and bail on anything that does not
-    // actually overlap.
-    //
-    // The subtle way this goes wrong: a box entirely to the LEFT of the target
-    // gives a negative x1, and TypedArray.fill treats a negative `end` as an
-    // offset from the END of the array rather than as an empty range. So the
-    // row fill ran from 0 to nearly the whole grid and the box scored ~100%
-    // coverage of a region it does not touch. Non-overlap on the y axis
-    // happened to escape it, because that produced an empty loop rather than an
-    // empty fill -- which is why this survived three pages of eyeballing.
+    // Both ends must be clamped, and non-overlapping boxes must bail: a box
+    // entirely left of the target gives a negative x1, and TypedArray.fill
+    // reads a negative `end` as an offset from the end of the array, so the row
+    // fills almost entirely and scores ~100% coverage of a region it never
+    // touches.
     const x0 = clamp(Math.floor((b.x0 - target.x0) * scale), gw);
     const x1 = clamp(Math.ceil((b.x1 - target.x0) * scale), gw);
     const y0 = clamp(Math.floor((b.y0 - target.y0) * scale), gh);
@@ -61,15 +51,13 @@ function intersects(a, b) {
 /**
  * Grouping quality: did the line-to-block step recover the baseline's regions?
  *
- * Detection recall says nothing about this. A candidate can find every glyph on
- * the page and still be useless if it welds four bubbles into one region, and
- * the coverage metric would happily report 100% while it did.
+ * Detection recall says nothing about this: a candidate can find every glyph on
+ * the page, weld four bubbles into one region, and still report 100% coverage.
  *
- * Scored through the LINES rather than by comparing boxes, because that is the
- * question that matters: two lines belong together if and only if they were in
- * the same baseline region. Each line is assigned to the baseline region it
- * overlaps most; lines overlapping nothing are ignored, since the baseline
- * missed that text and has no opinion about it.
+ * Scored through the lines rather than by comparing boxes, since the question is
+ * whether two lines that shared a baseline region ended up together. Each line
+ * is assigned to the baseline region it overlaps most; lines overlapping nothing
+ * are ignored, the baseline having missed that text.
  *
  *   split    a baseline region whose lines ended up in more than one block
  *   welded   a block holding lines from more than one baseline region
@@ -139,10 +127,8 @@ export function score(baseline, candidate, threshold = 0.5) {
 
   const found = perBaseline.filter((r) => r.coverage >= threshold);
 
-  // Not precision in the detection sense -- there is no ground truth for "text
-  // the baseline itself missed", and on-art SFX is exactly that case. Read it
-  // as "how much of what this candidate found was somewhere the baseline also
-  // saw text", i.e. a spurious-box smell test, not a verdict.
+  // A spurious-box smell test, not precision: there is no ground truth for text
+  // the baseline itself missed, which on-art SFX routinely is.
   const onBaseline = candidate.filter((c) => baseline.some((b) => intersects(b, c)));
 
   return {

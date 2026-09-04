@@ -1,10 +1,9 @@
 // The candidate roster.
 //
-// maxSide is swept rather than fixed because it is the setting most likely to
-// be blamed on the model -- see the note in paddle-db.mjs. A candidate that
-// looks hopeless at 960 and fine at 2048 has told you about resolution, not
-// about architecture, and the bake-off has to be able to tell those apart
-// before Dak is asked to judge anything.
+// maxSide is swept rather than fixed because it is the setting most likely to be
+// blamed on the model. A candidate that looks hopeless at 960 and fine at 2048
+// has told you about resolution, not about architecture, and the bake-off has to
+// tell those apart.
 
 import classical from "./classical.mjs";
 import { paddleCandidate } from "./paddle-db.mjs";

@@ -1,21 +1,9 @@
-// Prompt assembly.
+// Prompt assembly. There is no local OCR, so the model transcribes as well as
+// translates and `japanese` is something received rather than sent.
 //
-// Ported from backend/Yomi.Api/Translation/TranslationPrompt.cs, with the one
-// change v0.4 forces: the model now TRANSCRIBES as well as translates. There is
-// no local OCR any more, so `japanese` moves from something we send to
-// something we receive.
-//
-// ORDER MATTERS. Everything stable goes first, everything per-page goes last,
-// so a cache breakpoint can sit between them. From v0.4 the glossary joins the
-// stable prefix and becomes the largest reusable block in the request; cached
-// reads are ~10% of standard input on every provider we care about. Getting
-// this order right now avoids restructuring later.
-//
-// Note the v0.4 request is much SMALLER on the text side than v0.3's -- the
-// per-page suffix used to carry every OCR'd line and now carries a series id
-// and a count. Cost does not fall proportionally, because input was always
-// dominated by image tokens rather than text (~62% on a real page), and the
-// image now has boxes drawn on it.
+// Order matters: everything stable goes first and everything per-page last, so a
+// cache breakpoint can sit between them. The glossary will join the stable
+// prefix and become the largest reusable block in the request.
 
 export const SYSTEM = `
 You translate Japanese manga into natural English.
@@ -76,12 +64,11 @@ export function buildUserText(regionCount, seriesId) {
  * Strict JSON Schema for the response.
  *
  * Strict mode requires every property listed in `required` and
- * additionalProperties:false throughout; nullable fields are expressed as a
- * type union rather than by omission.
+ * additionalProperties:false throughout; nullable fields are a type union rather
+ * than an omission.
  *
- * Note what is absent: polygon and order. Those come from local detection and
- * are merged by id, per the standing rule that geometry never comes from the
- * model.
+ * No polygon and no order: geometry comes from local detection and is merged
+ * by id.
  */
 export const RESPONSE_SCHEMA = {
   type: "object",

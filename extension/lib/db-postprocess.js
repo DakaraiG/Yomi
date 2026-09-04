@@ -12,11 +12,10 @@ import { connectedComponents } from "./components.js";
 /**
  * Expand a box the way DB's unclip step expands a polygon.
  *
- * DB is trained on SHRUNK text regions, so the raw component is smaller than
- * the real text. Upstream unclips with a polygon offset of
- * `area * ratio / perimeter`; for an axis-aligned box that reduces to the same
- * distance applied on all four sides. Skipping this step is the single most
- * common reason a from-scratch DB port produces boxes that clip the glyphs.
+ * DB is trained on shrunk text regions, so the raw component is smaller than the
+ * real text. Upstream offsets the polygon by `area * ratio / perimeter`, which
+ * for an axis-aligned box is the same distance on all four sides. Skipping this
+ * is why a from-scratch DB port produces boxes that clip the glyphs.
  */
 function unclip(box, ratio) {
   const w = box.x1 - box.x0;
@@ -108,20 +107,16 @@ export function probabilityMapToBoxes(prob, {
 /**
  * Merge line-level boxes into block-level ones.
  *
- * NOT part of the recall metric, and deliberately so -- see lib/metrics.mjs.
- * General text detectors return one box per LINE, while comic-text-detector
- * returned one per text BLOCK, and the overlay wants blocks: one bubble, one
- * number, one translation. This is the crude version, good enough to make the
- * debug renders comparable and to give an honest region count.
+ * The crude version, used only to make the bake-off's debug renders comparable
+ * and give an honest region count; deliberately not part of the recall metric.
+ * The real grouper is lib/group.js.
  *
- * Two boxes merge when they overlap after being grown by `gap` on the axis
- * text stacks along. Japanese in manga is usually vertical, so columns sit
- * side by side and the horizontal gap between them is the one that matters --
- * but pages mix both, so grow on both axes and let overlap decide.
+ * Two boxes merge when they overlap after being grown by `gap`. Manga is usually
+ * vertical, so the horizontal gap between columns is what matters, but pages mix
+ * both -- so grow on each axis and let overlap decide.
  */
 export function mergeIntoBlocks(boxes, { gapRatio = 0.35, maxPasses = 6 } = {}) {
-  // Carries `members` so it can be scored by the same grouping metric as the
-  // real grouper -- otherwise "is the new one better" is unanswerable.
+  // `members` lets this be scored by the same grouping metric as lib/group.js.
   let current = boxes.map((b, i) => ({ ...b, members: [i] }));
 
   for (let pass = 0; pass < maxPasses; pass++) {
@@ -138,8 +133,8 @@ export function mergeIntoBlocks(boxes, { gapRatio = 0.35, maxPasses = 6 } = {}) 
         if (used[j]) continue;
         const b = current[j];
 
-        // Grow by a fraction of the SMALLER box's short side. Using the larger
-        // box lets one big block hoover up every unrelated line near it.
+        // A fraction of the smaller box's short side: using the larger lets one
+        // big block hoover up every unrelated line near it.
         const shortA = Math.min(a.x1 - a.x0, a.y1 - a.y0);
         const shortB = Math.min(b.x1 - b.x0, b.y1 - b.y0);
         const pad = Math.min(shortA, shortB) * gapRatio;

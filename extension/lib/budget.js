@@ -1,20 +1,12 @@
-// The spend ceiling for unattended translation.
+// The spend ceiling for unattended translation: scrolling is not a decision to
+// spend, and a brisk scroll through a chapter is twenty requests.
 //
-// Clicking the button is a decision to spend. Scrolling is not, and once pages
-// translate on scroll the extension can spend money nobody asked it to: a brisk
-// scroll through a twenty-page chapter is twenty requests. The cache makes
-// re-reads free, so the exposure is only ever on the first pass -- but that is
-// the difference between pennies and a surprise.
+// Counts paid calls, not pages. Cache hits cost nothing and are never counted,
+// and neither are manual translations, which the user asked for.
 //
-// THIS COUNTS PAID CALLS, NOT PAGES. A cache hit costs nothing and is never
-// counted, so re-reading a chapter you have already read stays free however
-// much you scroll. Manual translations are not counted either: the user asked
-// for those.
-//
-// Synchronous by design. The check and the increment have to be one step --
-// with a concurrency of three, an async gap between "is there budget" and
-// "take some" lets three pages all pass a check that only one of them should.
-// Persistence is the caller's problem, and is allowed to lag.
+// Synchronous by design: the check and the increment must be one step, or with a
+// concurrency of three all three pages pass a check only one should. Persistence
+// is the caller's problem and is allowed to lag.
 
 export const DEFAULT_LIMIT = 50;
 
@@ -36,8 +28,8 @@ export function createBudget(limit = DEFAULT_LIMIT) {
     },
 
     /**
-     * Take one paid translation, or refuse. Reserves BEFORE the call rather
-     * than counting after it, so concurrent pages cannot overshoot together.
+     * Take one paid translation, or refuse. Callers reserve before the call
+     * rather than counting after it, so concurrent pages cannot overshoot.
      */
     reserve() {
       if (spent >= limit) return false;

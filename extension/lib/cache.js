@@ -1,13 +1,9 @@
-// Page cache, IndexedDB.
+// Page cache, IndexedDB rather than memory: the service worker is killed on
+// idle, so an in-memory cache would lose everything within minutes.
 //
-// Replaces v0.3's in-memory server cache, which lost everything on restart. A
-// service worker is worse than a server here -- it is killed on idle, routinely,
-// so an in-memory cache in the worker would lose everything within minutes.
-//
-// What is cached is the finished TranslatedPage: geometry from local detection
-// merged with the model's text. Detection is cheap (~250ms) and the model call
-// is not (~15s and real money), but caching the merged result rather than just
-// the model's half means a re-read costs nothing at all.
+// Holds the finished TranslatedPage -- local geometry already merged with the
+// model's text -- so a re-read costs nothing rather than another ~250ms of
+// detection.
 
 const DB_NAME = "yomi";
 const DB_VERSION = 1;
@@ -47,12 +43,10 @@ function promisify(request) {
 /**
  * For IDBTransaction: resolves when the transaction commits.
  *
- * SEPARATE FROM promisify ON PURPOSE. A transaction is not a request and never
- * fires `success` -- it fires `complete`. Passing one to promisify() sets an
- * `onsuccess` property that nothing will ever call, so the promise never
- * settles and the await hangs forever. Not an error, not a rejection, no log:
- * the write itself succeeds, so the entry shows up in the cache on the next
- * run while the current run waits for a completion event that does not exist.
+ * Separate from promisify because a transaction fires `complete`, not `success`.
+ * Passing one to promisify() sets an onsuccess nothing ever calls, and the await
+ * hangs forever with no error -- the write succeeds, so the entry appears in the
+ * cache next run while this one waits for an event that does not exist.
  */
 function txDone(tx) {
   return new Promise((resolve, reject) => {
@@ -63,11 +57,9 @@ function txDone(tx) {
 }
 
 /**
- * SHA-256 of the image bytes, as "sha256:...".
- *
- * Hashed from the ORIGINAL retrieved bytes, not from the numbered render. The
- * render depends on detection output, so hashing it would make the cache key
- * depend on the thing the cache is meant to let us skip.
+ * SHA-256 of the image bytes, as "sha256:...". Callers must hash the original
+ * retrieved bytes: the numbered render depends on detection, which is the thing
+ * the cache exists to skip.
  */
 export async function contentHash(buffer) {
   const digest = await crypto.subtle.digest("SHA-256", buffer);
@@ -78,9 +70,8 @@ export async function contentHash(buffer) {
 /**
  * Look up a cached page, refreshing its read time.
  *
- * A miss is normal and must be cheap; any IndexedDB failure is also treated as
- * a miss, because a broken cache should cost a re-translation rather than break
- * the extension.
+ * Any IndexedDB failure is treated as a miss: a broken cache should cost a
+ * re-translation rather than break the extension.
  */
 export async function get(key) {
   try {

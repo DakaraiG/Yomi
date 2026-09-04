@@ -1,44 +1,30 @@
-// Yomi content script.
+// Yomi content script, injected when the toolbar button is clicked.
 //
-// Injected on demand when the toolbar button is clicked. The click ARMS the tab
-// rather than translating it once: from then on, pages translate as they come
-// into view, and clicking again disarms. Everything between the trigger and the
-// overlay -- retrieval, detection, grouping, ordering, the model call -- happens
-// out of the page, because a content script can do almost none of it: it cannot
-// fetch cross-origin, and it has no business holding an API key.
+// The click arms the tab rather than translating once: pages then translate as
+// they come into view, and clicking again disarms. Everything between the
+// trigger and the overlay happens in the service worker, since a content script
+// cannot fetch cross-origin and has no business holding an API key.
 //
-// AUTO-TRIGGERING SPENDS MONEY, and that is the whole design problem. Scrolling
-// is not a decision to pay for anything, so three things stand between a scroll
-// and a request:
+// Auto-triggering spends money, and scrolling is not a decision to pay for
+// anything, so three things stand between a scroll and a request: the dwell
+// timer, the queue (only CONCURRENCY in flight, and anything that scrolls away
+// while waiting is dropped), and the ceiling in the service worker, which is the
+// only side that can tell a paid call from a cache hit.
 //
-//   1. DWELL. A page must stay in view for DWELL_MS before it is worth
-//      anything. Scrolling briskly past twenty pages should cost nothing, and
-//      this is what makes that true.
-//   2. THE QUEUE. Only CONCURRENCY pages are ever in flight; the rest wait, and
-//      anything that scrolls out of view while still waiting is dropped before
-//      it costs a thing.
-//   3. THE CEILING, enforced in the service worker, which is the only side that
-//      can tell a paid call from a free cache hit.
-//
-// WHAT IS DELIBERATELY NOT CANCELLED: a request already sent to the model. The
-// money is committed the moment it goes out, and a cancelled page is not
-// cached, so cancelling and later re-reading that page pays for it twice.
-// Letting it finish costs nothing extra and fills the cache. Cancellation is
-// therefore something that happens to pages waiting, never to pages in flight.
+// A request already sent to the model is deliberately never cancelled: the money
+// is committed the moment it goes out and a cancelled page is not cached, so
+// cancelling and re-reading pays for it twice.
 
 (() => {
-  // How long a page must stay in view before it is worth paying for. Long
-  // enough that a flick through a chapter costs nothing, short enough that it
-  // does not feel broken when you stop to read.
+  // Long enough that a flick through a chapter costs nothing, short enough that
+  // stopping to read does not feel broken.
   const DWELL_MS = 400;
   // How far outside the viewport counts as "in view", so the next page is ready
-  // by the time it is reached. Detection is ~230ms and reads are cached, so a
-  // little lookahead holds comfortably.
+  // by the time it is reached.
   const BAND = "60% 0px";
   const CONCURRENCY = 3;
 
-  // Second click disarms. The toolbar button is the only control there is, so
-  // it has to be able to undo what it did.
+  // Second click disarms: the toolbar button is the only control there is.
   if (window.__yomiAuto) {
     window.__yomiAuto.disarm();
     return;
@@ -46,8 +32,8 @@
 
   const seen = new Map();        // img -> { status, timer }
   // Readers preload neighbouring pages, so the same src is often on several
-  // elements at once. Without this they race each other, both miss the cache
-  // because neither has finished, and the same page is paid for twice.
+  // elements at once. Without this they race, both miss the cache because
+  // neither has finished, and the page is paid for twice.
   const claimed = new Set();     // src already queued, in flight, or done
   const queue = [];
   let active = 0;
@@ -89,7 +75,7 @@
       claimed.delete(img.src);
       entry.status = "idle";
     }
-    // "inflight" is deliberately left alone -- see the header.
+    // "inflight" is deliberately left alone: the money is already committed.
   }
 
   function pump() {
@@ -112,10 +98,9 @@
       type: "YOMI_TRANSLATE",
       imageUrl: img.src,
       pageUrl: location.href,
-      // Marks this as unattended, which is what subjects it to the ceiling.
+      // Unattended, which is what subjects it to the ceiling.
       auto: true,
-      // Last-resort signal for series identity, used only when the URL carries
-      // none -- readers keyed entirely on chapter uuids.
+      // Series identity of last resort, for readers keyed entirely on uuids.
       pageTitle: document.title,
       // Only used if retrieval falls through to the screenshot strategy.
       dpr: window.devicePixelRatio,
@@ -128,8 +113,8 @@
     if (!result?.ok) {
       setStatus(img, "failed");
 
-      // The ceiling is not a per-page failure -- it is the end of unattended
-      // work for this session, so stop rather than retry every page in turn.
+      // The ceiling ends unattended work for the session, so stop rather than
+      // retry every page in turn.
       if (result?.budgetExceeded) {
         window.__yomiToast?.("Auto-translate ceiling reached — click to resume",
                              "error");
@@ -187,18 +172,16 @@
       return;
     }
 
-    // Sanity check worth having here: this is the first place the contract
-    // crosses a process boundary for real. Guarded by the emptiness check above
-    // -- an empty page has no regions[0], and reporting "kind is not a string:
-    // undefined" for it sends you hunting a serialisation bug that does not
+    // The contract's first real crossing of a process boundary. Must stay below
+    // the emptiness check: an empty page has no regions[0], and reporting it as
+    // a contract violation sends you hunting a serialisation bug that does not
     // exist.
     if (typeof page.regions[0].kind !== "string") {
       console.error("[yomi] CONTRACT: kind is not a string", page.regions[0]);
     }
-    // Only meaningful on the fetch paths. The screenshot strategy crops to the
-    // image's bounding box at devicePixelRatio, so the pixel count legitimately
-    // differs while the framing is identical -- and polygons are normalised, so
-    // the overlay still lands correctly.
+    // Only meaningful on the fetch paths: the screenshot strategy crops at
+    // devicePixelRatio, so its pixel count legitimately differs while the
+    // framing is identical, and normalised polygons still land correctly.
     if (result.strategy !== "screenshot" &&
         page.naturalWidth !== img.naturalWidth) {
       console.warn(
@@ -213,16 +196,12 @@
         japanese: r.japanese, english: r.english
       }))
     );
-    // The measured surface, so the ink/halo decision in background.js can be
-    // tuned against real numbers rather than guessed at. `fill` is no longer
-    // painted anywhere -- it is the measured background colour, and all it
-    // decides now is whether the lettering goes black-on-white or the reverse.
+    // The measured surface, so the decisions in background.js can be tuned
+    // against real numbers. `fill` is never painted; it is the measured
+    // background colour, and only decides which way round the lettering goes.
     console.table(
       page.regions.map((r) => ({
         order: r.order, kind: r.kind, bubble: r.inBubble,
-        // Why this region was or was not erased: `structure` is how much
-        // drawing sits behind its text, and anything at or above the threshold
-        // in lib/inpaint.js is left alone.
         erased: r.erased, structure: r.structure,
         lum: r.bgLum, sd: r.bgStd, share: r.bgShare, peak: r.bgPeak,
         fill: r.fill ? `rgb(${r.fill.join(",")})` : "—",
@@ -249,8 +228,8 @@
       if (!e.isIntersecting) { drop(img); continue; }
       if (entry.status !== "idle" || entry.timer) continue;
 
-      // The dwell gate. Cleared by drop() if the page leaves first, so a scroll
-      // that passes straight through never reaches enqueue().
+      // The dwell gate, cleared by drop() if the page leaves first, so a scroll
+      // straight past never reaches enqueue().
       entry.timer = setTimeout(() => {
         entry.timer = null;
         enqueue(img);
@@ -268,11 +247,11 @@
     for (const img of document.images) {
       if (img.complete) watch(img);
       // Readers lazy-load constantly, and an <img> with no dimensions yet fails
-      // isPageImage. Re-check once it has actually loaded.
+      // isPageImage.
       else img.addEventListener("load", () => !stopped && watch(img), { once: true });
     }
-    // Long-strip readers recycle nodes as you scroll. Forgetting the ones that
-    // have left the document keeps this from growing for a whole chapter.
+    // Long-strip readers recycle nodes as you scroll, so forget the ones that
+    // have left the document rather than growing for a whole chapter.
     for (const [img, entry] of seen) {
       // Never drop one mid-call: its result still has to be rendered, and the
       // queue still has to hear that the slot is free.
@@ -284,11 +263,8 @@
   }
 
   // Readers add pages as you scroll, so a single scan at arm time sees only the
-  // first screen of a long-strip chapter.
-  //
-  // Coalesced: a reader can fire hundreds of mutations while scrolling, and
-  // scan() walks every image on the page. Doing that per mutation makes the
-  // extension the reason the page stutters.
+  // first screen of a long-strip chapter. Coalesced because scan() walks every
+  // image and a reader fires hundreds of mutations while scrolling.
   let scanPending = false;
   const mo = new MutationObserver(() => {
     if (stopped || scanPending) return;

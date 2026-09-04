@@ -1,19 +1,15 @@
 // Candidate: comic-text-detector. GPL-3.0.
 //
-// The model that produced fixtures/baseline.json, back when it ran in v0.3's
-// Python sidecar. It is on the roster again for the head the others do not
-// have: a per-pixel text mask, which is what erasing the Japanese needs rather
-// than covering it. See fetch-models.mjs for why a GPL model is here at all
-// when the v0.4 rewrite existed to remove one.
+// On the roster for the head the others do not have: a per-pixel text mask,
+// which is what erasing the Japanese needs rather than covering it. See
+// fetch-models.mjs for why a GPL model is here at all.
 //
-// The letterboxing and the decode live in extension/lib/ctd-postprocess.js,
-// not here, so this measures the code that ships.
+// The letterboxing and the decode live in extension/lib/ctd-postprocess.js, so
+// this measures the code that ships.
 //
-// SCORING THIS AGAINST fixtures/baseline.json IS PARTLY CIRCULAR: the baseline
-// is this model's own output from the sidecar, so a number near 100% says the
-// port is faithful, not that the model is good. What the comparison is actually
-// worth is the grouping columns -- exact/split/weld are measured through
-// group.js and are a real judgement about box geometry.
+// Scoring it against fixtures/baseline.json is partly circular -- the baseline is
+// this model's own output -- so a number near 100% says the port is faithful,
+// not that the model is good. The grouping columns are the real comparison.
 
 import {
   CTD_SIZE, letterbox, decodeBlocks, cropChannel, fuse

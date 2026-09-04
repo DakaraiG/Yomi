@@ -1,17 +1,14 @@
 // Regression guard for the IndexedDB hang.
 //
 // IDBTransaction fires `complete`; IDBRequest fires `success`. Awaiting a
-// transaction through the request-shaped helper sets an `onsuccess` property
-// nothing ever calls, so the promise never settles and the await hangs
-// forever -- no error, no rejection, no log, and the write itself succeeds, so
-// the entry appears in the cache on the NEXT run while the current one waits
-// for an event that does not exist.
+// transaction through the request-shaped helper sets an `onsuccess` nothing ever
+// calls, so the promise never settles -- no error, no rejection, no log, and the
+// write itself succeeds, so the entry appears in the cache on the next run while
+// the current one waits for an event that does not exist. It presents as "the
+// extension hangs intermittently".
 //
-// That cost most of a debugging session, presenting as "the extension hangs
-// intermittently" and sending us through WebGPU, ORT vendoring and provider
-// timeouts first. It is worth a test even though the test is a static one:
-// there is no IndexedDB in Node, and the failure mode is a hang rather than an
-// exception, so a behavioural test would itself hang rather than fail.
+// Static rather than behavioural: there is no IndexedDB in Node, and a
+// behavioural test for a hang would itself hang rather than fail.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -25,10 +22,9 @@ const CACHE_SRC = join(HERE, "..", "..", "..", "extension", "lib", "cache.js");
 const source = await readFile(CACHE_SRC, "utf8");
 
 test("transactions are never awaited through the request helper", () => {
-  // Matches promisify(tx) exactly. NOT promisify(tx.objectStore(...).count()),
-  // which is a genuine IDBRequest that happens to be reached through the
-  // transaction -- an earlier `\btx\b` pattern flagged it, because a word
-  // boundary sits between "tx" and the dot.
+  // Matches promisify(tx) and not promisify(tx.objectStore(...).count()), which
+  // is a genuine IDBRequest reached through the transaction. A `\btx\b` pattern
+  // flags both, a word boundary sitting between "tx" and the dot.
   const misuse = source.match(/promisify\(\s*tx\s*\)/g);
   assert.equal(
     misuse, null,

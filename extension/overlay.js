@@ -1,36 +1,28 @@
-// Yomi overlay renderer.
+// Yomi overlay renderer: draws English over the page image from the backend's
+// normalised polygons. Three problems drive most of the code:
 //
-// Draws English over the page image using the normalised polygons from the
-// backend. Three problems worth naming, because they drive most of the code:
+// 1. Isolation. Manga readers have aggressive CSS, so everything lives in a
+//    shadow root and neither side can restyle the other.
 //
-// 1. ISOLATION. Manga readers have aggressive CSS. Everything lives inside a
-//    shadow root so the host page cannot restyle our boxes and we cannot
-//    restyle theirs.
+// 2. Fitting. Japanese is vertical and compact, English horizontal and long: a
+//    tall narrow bubble that held 8 kana has to hold a full sentence.
 //
-// 2. FITTING. Japanese is vertical and compact; English is horizontal and long.
-//    A tall narrow bubble that comfortably held 8 kana has to hold "You'll get
-//    a stomach ache sleeping like that". Binary search on font size is the
-//    workable answer -- see fitText.
-//
-// 3. REPOSITIONING. Zoom, window resize, and responsive readers all change the
-//    image's rendered size. Polygons are normalised 0-1 precisely so this is a
-//    multiply rather than a re-request.
+// 3. Repositioning. Zoom, window resize and responsive readers all change the
+//    image's rendered size. Polygons are normalised 0-1 so this is a multiply
+//    rather than a re-request.
 
 (() => {
   const HOST_ATTR = "data-yomi-overlay";
 
   // ---- font loading -------------------------------------------------------
   //
-  // THE TRAP: an @font-face rule declared inside a shadow root does not
-  // register the font. Font faces are document-scoped, so a @font-face in our
-  // shadow stylesheet is silently ignored and everything falls back -- with no
-  // error to tell you why.
+  // Font faces are document-scoped, so an @font-face rule inside a shadow root
+  // is silently ignored and everything falls back with no error. The CSS Font
+  // Loading API registers against the document, and the shadow tree can then use
+  // the family name normally.
   //
-  // The CSS Font Loading API registers against the document, and shadow DOM can
-  // then use the family name normally.
-  //
-  // Filenames must match what is actually in extension/fonts/. Faces that are
-  // missing are skipped, so a regular-only font still works.
+  // Filenames must match extension/fonts/; missing faces are skipped, so a
+  // regular-only font still works.
   const FACES = [
     { file: "YomiLetter-Regular.ttf",    weight: "400", style: "normal" },
     { file: "YomiLetter-Bold.ttf",       weight: "700", style: "normal" },
@@ -62,29 +54,20 @@
     });
   }
 
-  // Fallback expansion only. Boxes normally arrive already shaped by
-  // lib/layout.js, which knows the pixels and can widen a vertical region as
-  // far as its bubble actually goes; this is what a region falls back to if it
-  // arrives without one.
+  // Only for regions that arrive without a box shaped by lib/layout.js.
   const BOX_EXPAND = 0.08;
 
   const CSS = `
     :host { all: initial; }
     .layer { position: absolute; inset: 0; pointer-events: none; }
 
-    /* THE CLEAN PLATE: the whole page with the Japanese erased, drawn over the
-       original at exactly its rendered size. Every region sits on it, which is
-       why there is only one kind of region below -- the question "what is
-       behind this text" has the same answer everywhere now.
+    /* The clean plate: the whole page with the Japanese erased, drawn over the
+       original. Sized in percentages so it follows the host, which is already
+       positioned from the image's bounding rect on every resize and reflow.
 
-       Sized in percentages rather than pixels so it follows the host, which is
-       already positioned and sized from the image's bounding rect on every
-       resize, zoom and reflow. Nothing here needs to know the page's natural
-       dimensions.
-
-       image-rendering is left at the default: the plate IS the page at natural
-       size, so the browser is doing the same downscale it already does to the
-       image underneath, and matching it is the point. */
+       image-rendering stays at the default -- the plate is the page at natural
+       size, so the browser applies the same downscale as to the image beneath,
+       which is the point. */
     .plate {
       position: absolute;
       inset: 0;
@@ -100,87 +83,63 @@
       align-items: center;
       justify-content: center;
       box-sizing: border-box;
-      /* Nothing leaves the box. The box is the region of the page we have
-         measured and are entitled to paint on; text spilling out of it lands
-         on artwork or on a neighbour's bubble, which is the mess this is
-         meant to replace. A region that cannot fit its text at MIN_PX is
-         reported rather than allowed to bleed -- see layout(). */
+      /* The box is the only part of the page this region may paint on; text
+         spilling out of it lands on artwork or a neighbour's bubble. A region
+         that cannot fit its text is reported rather than allowed to bleed. */
       overflow: hidden;
       text-align: center;
       font-family: "Yomi Letter", "CC Wild Words", "Wild Words", "Anime Ace",
                    "Comic Neue", "Comic Sans MS", system-ui, sans-serif;
       font-weight: 700;
-      /* Scanlation convention. Costs nothing and does more for the look than
-         any other single change. */
+      /* Scanlation convention. */
       text-transform: uppercase;
       line-height: 1.06;
       letter-spacing: 0.005em;
       hyphens: auto;
       overflow-wrap: break-word;
-      /* Greedy wrapping fills each line to the brim and leaves the last one
-         holding a single word -- the other half of the machine-made look, and
-         the half that survives however well the box is shaped. Balancing evens
-         the line lengths instead, which is what a letterer does by hand. It is
-         the shape of the ragged edge people read as hand-set. */
+      /* Greedy wrapping fills each line to the brim and leaves the last holding
+         a single word; balancing evens the line lengths, which is the ragged
+         edge people read as hand-set. */
       text-wrap: balance;
       pointer-events: auto;
       cursor: default;
     }
 
-    /* --ink and --halo are set per region from the pixels measured in the
-       service worker, and are all that is left of that measurement: there is
-       no --fill because nothing is filled any more. Defaults here are the old
-       white-bubble assumption, used only if a region arrives unmeasured. */
+    /* --ink and --halo are set per region from pixels measured in the service
+       worker; the defaults here are for a region that arrives unmeasured. */
     .region {
       --ink: #000;
       --halo: #fff;
-      /* Above the plate, stated rather than inherited from tree order. The
-         regions are appended after the plate so they would paint above it
-         anyway today, but that is an accident of insertion order and one
-         reordering away from every translation vanishing behind an image of
+      /* Above the plate, stated rather than left to insertion order, which is
+         one reordering away from every translation vanishing behind an image of
          the page it belongs to. */
       z-index: 1;
       color: var(--ink);
-      /* In em, not %. Percentage padding resolves against the box's WIDTH on
-         every side, so a wide short box lost ~30% of its height to top and
-         bottom padding and had to set its text smaller to compensate. In em it
-         tracks the lettering instead. */
+      /* In em, not %: percentage padding resolves against the box's width on
+         every side, so a wide short box loses a third of its height to top and
+         bottom padding and has to set its text smaller to compensate. */
       padding: 0.1em 0.3em;
 
-      /* THE HALO IS NOW A STYLE CHOICE, WHICH IT USED TO NOT BE.
-         It began as the only way to make English readable on top of Japanese
-         that could not be removed: a 0.18em stroke and eight stacked shadows,
-         tuned by eye, meant to look like too much -- because too much was what
-         it took to win against the artwork AND the lettering underneath it.
-         The plate removes the lettering, so what is left to survive is only the
-         artwork: screentone, hatching, a panel tone. That needs separation, not
-         a cushion. A light stroke does it, and it does not read as a sticker.
-         On a repaired white bubble it costs nothing and is invisible. */
+      /* The plate removes the Japanese, so the only thing left for the text to
+         separate itself from is artwork -- screentone, hatching, a panel tone.
+         A light stroke does that without reading as a sticker; the heavy
+         treatment survives below for regions the plate could not repair. */
       -webkit-text-stroke: 0.08em var(--halo);
       paint-order: stroke fill;
       text-shadow: 0 0 0.12em var(--halo), 0 0 0.24em var(--halo);
     }
 
-    /* SFX keeps its tracking, so it still reads as SFX rather than as
-       narration that happened to land on artwork. It no longer needs a
-       different stroke: the reason it had one was that SFX always outlined
-       while everything else filled, and there was a jump between the two. */
+    /* Tracking, so SFX still reads as SFX rather than as narration that
+       happened to land on artwork. */
     .region.sfx {
       letter-spacing: 0.02em;
     }
 
-    /* THE JAPANESE IS STILL UNDER THIS ONE.
-       Set by the service worker for regions the plate deliberately left alone —
-       hand-drawn SFX out on bare artwork, where there is nothing behind the
-       strokes to reconstruct and erasing them rubs out the drawing. See
-       attachCleanPlate.
-       So this is the old .outlined treatment, kept for exactly the case it
-       was built for: a stroke to separate each glyph from the art, and stacked
-       shadows to build an opaque cushion that follows the text's own shape. The
-       repeats are the point — each identical shadow compounds the alpha, so
-       eight of them turn a blur into something solid enough to read English
-       off. Tuned by eye against real pages; it is meant to look like too much,
-       because it is winning against artwork AND the lettering underneath. */
+    /* The Japanese is still under this one: the service worker marks regions the
+       plate deliberately left alone, where erasing would rub out the drawing.
+       The repeated identical shadows are the point -- each compounds the alpha,
+       so eight of them build an opaque cushion in the text's own shape, enough
+       to win against artwork and the lettering underneath. */
     .region.unerased {
       -webkit-text-stroke: 0.18em var(--halo);
       padding: 0;
@@ -189,12 +148,10 @@
         0 0 0.30em var(--halo), 0 0 0.30em var(--halo),
         0 0 0.60em var(--halo), 0 0 0.60em var(--halo),
         0 0 0.60em var(--halo), 0 0 0.90em var(--halo);
-      /* BESIDE THE ARTWORK, NOT ON IT. The box belongs to the drawing now --
-         that is the whole point of not erasing it -- so the English is placed
-         against its edge instead of centred in it, and is allowed out of its
-         own box, which no other region is. layout() gives it a strip next to
-         the region; this is what stops the strip from clipping a descender or
-         a wide word. */
+      /* Beside the artwork, not on it: the box belongs to the drawing, so
+         layout() gives this region a strip alongside instead, and it is the one
+         kind of region allowed out of its own box rather than clipping a
+         descender or a wide word. */
       overflow: visible;
       align-items: flex-start;
       white-space: nowrap;
@@ -240,9 +197,8 @@
   /**
    * Largest font size at which the text still fits.
    *
-   * Binary search rather than shrink-until-it-fits: ~6 measurements instead of
-   * up to 40, and each measurement forces a reflow, so the difference is real
-   * on a page with 20 regions.
+   * Binary search rather than shrink-until-it-fits: every measurement forces a
+   * reflow, so ~6 beats up to 40 on a page with 20 regions.
    */
   function fitText(el, maxPx) {
     let lo = 5, hi = Math.max(6, Math.floor(maxPx)), best = 5;
@@ -270,67 +226,41 @@
   }
 
   /**
-   * Layout in two passes.
+   * Position and size every region: pass 1 finds the largest size each box could
+   * take on its own, pass 2 applies the page-wide cap and floor.
    *
-   * Pass 1 finds the largest size each box could take on its own.
+   * Size tracks the bubble, as in published scans -- a big bubble gets big
+   * lettering and a two-word one does not shout -- so the page percentile is a
+   * cap on the outliers rather than a uniform target. Sizing every box near the
+   * tightest one on the page throws away the room in all the others.
    *
-   * Pass 2 USED TO pick one size for the whole page -- the 35th percentile of
-   * those maxima -- on the theory that uniform lettering looks professional.
-   * That theory is wrong, and it is why the type came out small: sizing every
-   * box near the tightest one on the page throws away the room in all the
-   * others, and two thirds of the page renders smaller than it could.
-   *
-   * Look at what published scans actually do and the size plainly tracks the
-   * bubble -- a big bubble gets big lettering, "THANKS~" in a small one gets
-   * small lettering, on the same page. So the page percentile is a CAP on the
-   * outliers, not a target: a box uses its own maximum, and only the largest
-   * few are pulled back so a two-word bubble does not shout.
-   *
-   * THE FLOOR IS SOFT, and it has to be. Left alone, pass 2 drives every box
-   * down to whatever the tightest one allows, and text at 6px covers the
-   * Japanese while being unreadable itself. So MIN_PX pulls the uniform size
-   * back up.
-   *
-   * What it must never do is set a size the box cannot hold. A hard floor did
-   * exactly that: boxes were given 11px whether or not 11px fitted, words then
-   * ran past the edges, and with nothing allowed out of the box they were cut
-   * off mid-word -- text visibly fighting the box it sits in. The floor now
-   * raises the UNIFORM size only, and never past what the box measured as
-   * able to hold. A box too small for MIN_PX renders small rather than clipped.
+   * Both the cap and the MIN_PX floor are soft: neither may set a size the box
+   * did not measure as able to hold, or words run past the edges and, with
+   * nothing allowed out of the box, get cut off mid-word.
    */
 
   const CAP_PERCENTILE = 0.8;
   const MIN_PX = 11;
 
   // The strip an unerased region's translation is set in, as a fraction of the
-  // region's own height and as a floor in pixels. Deliberately small: this is a
-  // label next to a drawing, not a replacement for it, and a big one would
-  // cover the artwork the region was spared in order to keep.
+  // region's height and as a floor in pixels. Deliberately small: a label beside
+  // a drawing, not a replacement for it.
   const SFX_STRIP = 0.34;
   const SFX_STRIP_PX = 16;
 
   function layout(host, layer, img) {
     const t0 = performance.now();
     const r = positionHost(host, img);
-    // REGIONS ONLY, not every child of the layer. The clean plate is an <img>
-    // in here too, and it has no data-bounds -- so `layer.children` put it
-    // through JSON.parse(undefined) on the first iteration of the map below,
-    // which threw and abandoned layout() before a single region was positioned.
-    // Every region then rendered at its static position and default size:
-    // twenty translations stacked on top of each other at the top of the page,
-    // with no error visible unless you notice the "fitted N region(s)" line
-    // missing from the log.
+    // Regions only: the clean plate is an <img> in the same layer with no
+    // data-bounds, and JSON.parse(undefined) below would abandon layout() before
+    // a single region was positioned, stacking every translation at the top of
+    // the page with nothing but a missing log line to show for it.
     const els = Array.from(layer.querySelectorAll(".region"));
 
-    // SKIP IF NOTHING MOVED. fitText binary-searches the font size, and every
-    // step reads scrollHeight straight after writing fontSize, which forces a
-    // synchronous reflow -- about six per region, and more expensive now that
-    // each reflow also does balanced wrapping and hyphenation. At 25 regions
-    // that is ~150 forced reflows, on the page's own main thread.
-    //
-    // layout() runs on render AND on every ResizeObserver and window resize
-    // callback, and readers fire those freely. If the image is the same size as
-    // last time, every size already computed is still correct.
+    // Skip if nothing moved. layout() runs on render and on every
+    // ResizeObserver and window-resize callback, which readers fire freely, and
+    // each fitText step forces a synchronous reflow on the page's own main
+    // thread -- ~150 of them at 25 regions.
     if (host.__yomiFitAt &&
         Math.abs(host.__yomiFitAt.w - r.width) < 0.5 &&
         Math.abs(host.__yomiFitAt.h - r.height) < 0.5) {
@@ -341,12 +271,10 @@
     const maxima = els.map((el) => {
       const b = JSON.parse(el.dataset.bounds);
 
-      // A region the plate could not repair keeps its artwork, so its box is
-      // not ours to write in. Put the translation in a strip against the
-      // outside edge instead -- below by default, above when below would leave
-      // the page -- small, and leaning on the halo to be readable over whatever
-      // it lands on. It is the scanlation convention for SFX: the drawing is
-      // left alone and the reading is set next to it.
+      // A region the plate could not repair keeps its artwork, so the
+      // translation goes in a strip against the outside edge instead -- below
+      // by default, above when below would leave the page. The scanlation
+      // convention for SFX: leave the drawing, set the reading beside it.
       if (el.classList.contains("unerased")) {
         const strip = Math.max(SFX_STRIP_PX, b.h * r.height * SFX_STRIP);
         const below = (b.y + b.h) * r.height;
@@ -373,13 +301,11 @@
 
     const clipped = [];
     els.forEach((el, i) => {
-      // min() last: whatever the floor and the cap want, the size the box
-      // measured as able to hold wins. Setting a size a box cannot hold is what
-      // made words run past the edges and get cut off mid-word.
+      // min() last: whatever the floor and cap want, the size the box measured
+      // as able to hold wins.
       el.style.fontSize = `${Math.min(maxima[i], Math.max(MIN_PX, cap))}px`;
-      // An unerased region is MEANT to overflow its strip -- the strip is an
-      // anchor, not a container, and it renders with overflow visible. Checking
-      // it here would report every SFX label on the page as clipped and bury
+      // An unerased region is meant to overflow: its strip is an anchor, not a
+      // container. Checking it would report every SFX label as clipped and bury
       // the real ones.
       if (el.classList.contains("unerased")) return;
       const over = el.scrollHeight > el.clientHeight + 1 ||
@@ -387,17 +313,16 @@
       if (over) clipped.push(el.textContent.slice(0, 30));
     });
 
-    // Reported, not drawn on the page. An outline around the offenders was a
-    // useful debugging aid and a visible defect in the thing being debugged.
+    // Reported, not drawn: an outline around the offenders is a visible defect
+    // in the thing being debugged.
     if (clipped.length) {
       console.warn(
         `[yomi] ${clipped.length}/${els.length} region(s) too small even for ` +
         `their fitted size:`, clipped);
     }
 
-    // So "the overlay feels slow" can be separated from "the translation was
-    // slow". This is page-side layout only and has nothing to do with the
-    // model call.
+    // Page-side layout only, so "the overlay feels slow" can be separated from
+    // "the model call was slow".
     console.log(
       `[yomi] fitted ${els.length} region(s) in ` +
       `${Math.round(performance.now() - t0)}ms`);
@@ -422,15 +347,11 @@
     layer.className = "layer";
     shadow.appendChild(layer);
 
-    // THE PLATE FIRST, so every region lands on top of it.
+    // The plate first, so every region lands on top of it.
     //
-    // A data URL rather than a blob URL: a blob URL has to be revoked or it
-    // leaks for the lifetime of the tab, and an overlay that is torn down and
-    // rebuilt on every resize would leak one per rebuild. The base64 is a few
-    // hundred KB and the decode is off the main thread.
-    //
-    // A page cached before plates existed arrives without one and simply
-    // renders on the original background, which is what it did before.
+    // A data URL rather than a blob URL: a blob URL must be revoked or it leaks
+    // for the lifetime of the tab, and this overlay is rebuilt on every resize.
+    // A page cached before plates existed has none and renders on the original.
     if (page.plate) {
       const plate = document.createElement("img");
       plate.className = "plate";
@@ -442,36 +363,24 @@
     for (const region of page.regions) {
       const el = document.createElement("div");
       const untranslated = !region.english;
-      // ONE SURFACE, AND THE OLD ONE AS A FALLBACK. There used to be two paths
-      // chosen by geometry -- filled inside a drawn bubble, outlined everywhere
-      // else -- because a rectangle is safe on a bubble's flat interior and
-      // destroys artwork anywhere else, so text on a panel tone had to sit on
-      // top of the Japanese under a halo heavy enough to win. The plate erases
-      // the Japanese instead, so that branch is gone.
-      //
-      // What is left is not a second surface but a fallback for the regions the
-      // plate could not repair -- hand-drawn SFX on bare artwork, which the
-      // service worker deliberately leaves alone. Those still have Japanese
-      // under them, so they still need the heavy treatment. The overlay does
-      // not decide this; it renders what attachCleanPlate says it did.
+      // The overlay does not decide what was erased; it renders what the
+      // service worker reports. An unerased region still has Japanese under it
+      // and needs the heavy treatment.
       const unerased = region.erased === false ? " unerased" : "";
       el.className =
         `region ${region.kind}${unerased}${untranslated ? " untranslated" : ""}`;
 
-      // Stark, like the scans this imitates -- they letter in pure black on
-      // pure white, and a near-black on a near-white reads as washed out next
-      // to the artwork's own solid blacks.
+      // Pure black or white, like the scans this imitates: a near-black reads as
+      // washed out next to the artwork's own solid blacks.
       if (region.darkBg !== undefined) {
         el.style.setProperty("--ink", region.darkBg ? "#fff" : "#000");
         el.style.setProperty("--halo", region.darkBg ? "#000" : "#fff");
       }
 
-      // REQUIRED for hyphens: auto to do anything. Hyphenation is per-language
-      // and the browser will not guess: inside a shadow root on a Japanese
-      // reader these inherit lang="ja" or nothing at all, and the rule silently
-      // does nothing. Official scans hyphenate constantly -- REMEM-BER,
-      // DI-VORCED, EL-EMENTARY -- because it is the only way long words fit a
-      // narrow bubble without shrinking the whole page's lettering.
+      // Required for `hyphens: auto` to do anything: hyphenation is
+      // per-language and the browser will not guess, and inside a shadow root on
+      // a Japanese reader these otherwise inherit lang="ja" or nothing. Without
+      // it, long words cannot fit a narrow bubble at any readable size.
       el.lang = untranslated ? "ja" : "en";
       el.textContent = untranslated ? region.japanese : region.english;
       el.dataset.jp = region.japanese;
@@ -498,8 +407,8 @@
   };
 
   // ---- status toast -------------------------------------------------------
-  // Clicking the toolbar button used to produce nothing visible for ten seconds,
-  // which is indistinguishable from the extension being broken.
+  // A translation takes ten seconds, and silence for that long is
+  // indistinguishable from the extension being broken.
 
   const TOAST_ID = "yomi-toast-host";
 
@@ -552,8 +461,8 @@
     }
   };
 
-  // Toggle key. `t` hides every overlay so the original page can be read, which
-  // is also the fastest way to check a translation against the Japanese.
+  // `t` hides every overlay, to read the original or check a translation
+  // against the Japanese.
   if (!window.__yomiToggleBound) {
     window.__yomiToggleBound = true;
     let hidden = false;

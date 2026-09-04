@@ -5,12 +5,11 @@
 //   out  sigmoid_0.tmp_0  N,1,H,W float32 -- already through a sigmoid, so the
 //                         output is a probability map, not logits
 //
-// THE PARAMETER THAT MATTERS IS maxSide. PaddleOCR's own default caps the long
-// edge at 960px, which is tuned for photographs of signs and receipts. A manga
-// page is 2000-3000px of small vertical text; downscaling it to 960 shrinks a
-// glyph below the resolution the model can resolve at all. Expect the 960 run
-// to look like a failure of the model when it is a failure of the setting --
-// which is exactly why run.mjs sweeps it.
+// maxSide is the parameter that matters. PaddleOCR's default caps the long edge
+// at 960px, tuned for photographs of signs and receipts; a manga page is
+// 2000-3000px of small vertical text, and downscaling shrinks a glyph below what
+// the model can resolve. The 960 run looks like a failure of the model when it
+// is a failure of the setting, which is why run.mjs sweeps it.
 
 import { resizeRGBA, toTensor, padTo } from "../lib/image.mjs";
 import { probabilityMapToBoxes } from "../lib/db-postprocess.mjs";
@@ -43,10 +42,9 @@ export function paddleCandidate({
     async detect(raster) {
       const { width, height } = raster;
 
-      // Long edge to maxSide, then both edges up to a multiple of 32 -- the
-      // model's downsampling stack requires it, and a non-conforming shape
-      // fails deep inside the graph with a shape-mismatch that names an
-      // internal node rather than the input.
+      // Long edge to maxSide, then both edges up to a multiple of 32: the
+      // downsampling stack requires it, and a non-conforming shape fails deep
+      // in the graph naming an internal node rather than the input.
       const ratio = Math.min(1, maxSide / Math.max(width, height));
       const inW = padTo(Math.round(width * ratio), 32);
       const inH = padTo(Math.round(height * ratio), 32);
@@ -64,8 +62,8 @@ export function paddleCandidate({
         binaryThreshold,
         boxThreshold,
         unclipRatio,
-        // Boxes come back in the resized frame; the caller works in original
-        // pixels throughout, so undo the resize here and nowhere else.
+        // Boxes come back in the resized frame and the caller works in original
+        // pixels, so the resize is undone here and nowhere else.
         scaleX: width / inW,
         scaleY: height / inH,
         imageWidth: width,
