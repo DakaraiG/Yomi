@@ -1,31 +1,27 @@
 // comic-text-detector: input preparation and output decoding.
 //
-// Lives here rather than in the bake-off because the bake-off measures what
-// ships -- tools/bakeoff/candidates/ctd.mjs imports this file, the same way
-// lib/db-postprocess.mjs re-exports db-postprocess.js. A copy on each side
-// would drift, and the drift would be invisible: the harness would keep
-// reporting numbers for a decoder nobody runs.
+// Lives in the extension rather than the bake-off so that the bake-off measures
+// what ships: tools/bakeoff/candidates/ctd.mjs imports this file. A copy on each
+// side would drift invisibly, with the harness reporting numbers for a decoder
+// nobody runs.
 //
-// Model signature, confirmed against the file rather than assumed:
+// Model signature, confirmed against the file:
 //   in   images   [1,3,1024,1024] float32, RGB, 0-1, letterboxed
 //   out  blk      [1,64512,7]     YOLOv5 detections, already anchor-decoded:
-//                                 cx, cy, w, h, obj, cls0, cls1 in INPUT space
+//                                 cx, cy, w, h, obj, cls0, cls1 in input space
 //   out  seg      [1,1,1024,1024] per-pixel text mask
 //   out  det      [1,2,1024,1024] DBNet-style line head, channel 0 = probability
 //
-// 64512 = (128^2 + 64^2 + 32^2) x 3 anchors, which is the arithmetic to check
-// if a future export changes shape. The input dims are STATIC, so unlike the
-// PaddleOCR path there is no maxSide to tune -- every page is squashed to
-// 1024 on its long edge whatever the hardware.
+// 64512 = (128^2 + 64^2 + 32^2) x 3 anchors, the arithmetic to check if a future
+// export changes shape.
 
 import { resizeRGBA } from "./imageops.js";
 
 export const CTD_SIZE = 1024;
 
-// LETTERBOX PAD IS 114, not 0 and not 255. Black or white pad reads as page
-// content -- white merges with the margin and pulls detections outward, black
-// reads as panel gutter. The image goes at the TOP-LEFT corner, so undoing the
-// pad is a crop rather than an offset.
+// Not 0 and not 255: black or white pad reads as page content -- white merges
+// with the margin and pulls detections outward, black reads as panel gutter. The
+// image goes at the top-left, so undoing the pad is a crop, not an offset.
 export const CTD_PAD = 114;
 
 /**
@@ -108,9 +104,8 @@ export function decodeBlocks(data, { stride, count, r, width, height,
 /**
  * Crop one channel of a [1,C,size,size] output down to the unpadded region.
  *
- * CROP BEFORE RESIZING, always. Scaling the full 1024 square back to page
- * dimensions treats the padding as image and lands every box and every mask
- * pixel offset by the pad's share of the edge.
+ * Always before resizing: scaling the full square back to page dimensions treats
+ * the padding as image and offsets every box and mask pixel.
  */
 export function cropChannel(data, { size = CTD_SIZE, nw, nh, channel = 0 } = {}) {
   const off = channel * size * size;
@@ -151,19 +146,17 @@ export function resizeMap(src, srcW, srcH, outW, outH) {
 /**
  * Line boxes plus the block boxes no line landed in.
  *
- * This is the cheap version of what upstream's fusion does, and it is what
- * fixtures/baseline.json was produced by -- which is why neither head alone
- * scores 100% against that baseline and the two together score exactly 100%.
+ * The cheap version of upstream's fusion, and what fixtures/baseline.json was
+ * produced by -- which is why neither head alone scores 100% against it.
  *
- * Only the UNCOVERED blocks are added. Handing every block box downstream
- * alongside the lines it contains costs nothing in recall and measurably hurts
- * grouping (ynko3: 3 splits instead of 1), because groupIntoBlocks and its 0.55
- * enclosure threshold were tuned on line geometry and have never been shown a
- * whole-region box sitting on top of its own lines.
+ * Only uncovered blocks are added: handing a block box downstream alongside the
+ * lines it contains costs nothing in recall and hurts grouping, which was tuned
+ * on line geometry and has never been shown a region box sitting on its own
+ * lines.
  *
- * Coverage is by a line's CENTRE, not by overlap: an unclipped line box on a
- * neighbouring bubble routinely clips the edge of this block, and an edge clip
- * is not evidence that this block's own text was found.
+ * Coverage is by a line's centre rather than by overlap, since a line box on a
+ * neighbouring bubble routinely clips this block's edge, and an edge clip is not
+ * evidence that this block's own text was found.
  */
 export function fuse(lines, blocks) {
   const uncovered = blocks.filter((b) => !lines.some((l) => {

@@ -1,29 +1,21 @@
 // Derive a stable series identifier from a reader URL.
 //
-// The glossary is keyed on this, so it has exactly one job: be the SAME string
-// across every chapter of one series, and a DIFFERENT string for two series on
-// the same host. v0.3's rule -- hostname plus the first path segment -- fails
-// both ways at once, and the failures are silent:
+// The glossary is keyed on this, so it has one job: the same string across every
+// chapter of one series, a different string for two series on the same host.
+// Both failures are silent -- collapsing two series fills one glossary with
+// contradictory terms, and splitting a series' chapters means none of them
+// accumulates anything.
 //
-//   mangafire.to/read/one-piece.abc/en/chapter-1   -> mangafire.to/read
-//   mangafire.to/read/berserk.xyz/en/chapter-1     -> mangafire.to/read
-//     Every series on the host collapses together. The glossary fills up with
-//     terms from unrelated works and starts contradicting itself.
-//
-//   namicomi.com/en/title/<uuid>/slug/chapter/<chapter-uuid>
-//     The first segment is a locale, and further down the chapter carries its
-//     own uuid, so no two chapters ever agree. No series accumulates anything.
-//
-// The shape that works is a per-site rule where the site's URLs are known, and
-// a conservative structural guess where they are not.
+// The naive rule (hostname plus first path segment) fails both ways at once:
+// mangafire puts every series under /read/, while namicomi leads with a locale
+// and gives each chapter its own uuid. So: a per-site rule where the URLs are
+// known, a conservative structural guess where they are not.
 
 /**
  * Site rules. Each returns the series key, or null to fall through.
  *
- * Keys deliberately exclude anything chapter-specific. Where a site gives a
- * stable opaque id (a uuid, a numeric id) that is preferred over the slug --
- * slugs get renamed when a title's translation changes, and a renamed slug
- * silently forks the glossary.
+ * A stable opaque id is preferred over a slug: slugs get renamed when a title's
+ * translation changes, and a renamed slug silently forks the glossary.
  */
 const RULES = [
   {
@@ -75,9 +67,7 @@ function stripChapterSuffix(slug) {
  * Structural guess for a site with no rule.
  *
  * Takes the segment after the first series marker, stopping before anything
- * chapter-shaped. Falls back to the first non-locale segment, which is what
- * v0.3 did -- but only after the better options are exhausted, and never
- * including a chapter segment.
+ * chapter-shaped, and falls back to the first non-locale segment.
  */
 function structuralKey(segments) {
   const usable = [];
@@ -134,9 +124,9 @@ export function deriveSeriesId(pageUrl, { title = null } = {}) {
   const structural = structuralKey(segments);
   if (structural) return `${host}/${structural}`;
 
-  // Nothing in the URL identifies the series. The page's own title is the last
-  // signal available, and it is better than a constant -- a constant would put
-  // every series on the host into one glossary, which is the v0.3 failure.
+  // Nothing in the URL identifies the series, so the page title is the last
+  // signal left. Still better than a constant, which would put every series on
+  // the host into one glossary.
   const titled = fromTitle(title);
   if (titled) return `${host}/${titled}`;
 

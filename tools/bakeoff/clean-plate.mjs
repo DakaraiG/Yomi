@@ -7,14 +7,12 @@
 //   <page>.plate.png     the page with the Japanese erased
 //   <page>.mask.png      the erase mask, white on black
 //
-// LOOK AT THE OUTPUT. Four metrics on this task have scored a visibly broken
-// result as a large improvement -- near-white fraction, ink-vs-row-median,
-// local contrast ratio, texture ratio -- because each derives its reference
-// from the result, so a confidently wrong UNIFORM output scores as clean. This
-// tool therefore prints coverage numbers and draws pictures, and does not
-// pretend to grade anything.
+// This prints coverage numbers and draws pictures rather than grading anything.
+// Every automatic metric tried on this task derives its reference from the
+// result, so a confidently wrong uniform output scores as clean -- the output
+// has to be looked at.
 //
-// It runs the SHIPPING code: extension/lib/inpaint.js and ctd-postprocess.js.
+// Runs the shipping code: extension/lib/inpaint.js and ctd-postprocess.js.
 
 import { createCanvas } from "@napi-rs/canvas";
 import { mkdir, readdir, writeFile } from "node:fs/promises";
@@ -81,18 +79,15 @@ async function main() {
     const seg = resizeMap(
       cropChannel(result[segName].data, { size: CTD_SIZE, nw, nh }), nw, nh, width, height);
 
-    // Regions first: the mask is confined to them, so they are an input to it
-    // rather than something measured afterwards.
+    // Regions first: the mask is confined to them.
     const lineMap = cropChannel(result[detName].data, { size: CTD_SIZE, nw, nh, channel: 0 });
     const lines = probabilityMapToBoxes(lineMap, {
       width: nw, height: nh, scaleX: width / nw, scaleY: height / nh,
       imageWidth: width, imageHeight: height
     });
-    // FUSED, exactly as lib/detect.js returns it. Grouping the det lines alone
-    // is a different region set -- it misses whatever only the YOLO head found,
-    // which on ynko.jpg is the 394mg logo. Get this wrong and the tool draws a
-    // plate the extension will never produce, and the difference lands on
-    // precisely the regions this change is about.
+    // Fused, exactly as lib/detect.js returns it. Grouping the det lines alone
+    // misses whatever only the YOLO head found, which would draw a plate the
+    // extension never produces.
     const blk = result[blkName];
     const blocks = groupIntoBlocks(raster, fuse(lines, decodeBlocks(blk.data, {
       stride: blk.dims[2], count: blk.dims[1], r, width, height
@@ -108,10 +103,9 @@ async function main() {
     let on = 0;
     for (let i = 0; i < mask.length; i++) on += mask[i];
 
-    // Per-region structure: the number that decides whether erasing this
-    // region repairs it or rubs the drawing out. Printed rather than acted on,
-    // because the threshold has to be chosen by looking at both the number and
-    // the picture.
+    // Structure decides whether erasing a region repairs it or rubs the drawing
+    // out. Printed rather than acted on: the threshold is chosen by looking at
+    // the number and the picture together.
     const measured = blocks.map((b) => ({
       b,
       cov: maskCoverage(mask, width, b),
@@ -119,12 +113,10 @@ async function main() {
       inBubble: b.inBubble === true
     })).sort((a, z) => z.structure - a.structure);
 
-    // HALF the exclusion the service worker applies. The worker spares a region
-    // only if it is short enough to be onomatopoeia AND has drawing behind it;
-    // both halves of the first test need the translation, and there is no model
-    // call here, so this is the structure test alone. Expect this tool to spare
-    // MORE than the extension does -- a long narration block on a busy panel
-    // shows up as KEPT here and is erased in the product.
+    // Half the exclusion the service worker applies: its length test needs the
+    // translation, and there is no model call here. So this spares more than the
+    // extension does -- a long narration block on a busy panel is kept here and
+    // erased in the product.
     let kept = 0;
     for (const m of measured) {
       if (m.structure < STRUCTURE_THRESHOLD) continue;

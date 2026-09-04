@@ -1,9 +1,6 @@
-// Image loading and pixel helpers.
-//
-// Everything here is written against the Canvas2D API on purpose. The same
-// calls exist in an offscreen document, so the preprocessing and rendering
-// written for this harness ports into the extension unchanged rather than
-// being thrown away when Phase 1 ends.
+// Image loading and pixel helpers, written against the Canvas2D API so that the
+// preprocessing and rendering here run unchanged in the extension's offscreen
+// document.
 
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 

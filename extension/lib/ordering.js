@@ -1,23 +1,17 @@
 // Reading-order sort for manga text regions.
 //
-// Port of sidecar/app/ordering.py.
-//
 // Reading order is panel-major: finish one panel before starting the next,
-// panels right-to-left within a row, rows top-to-bottom. That needs panel
-// boundaries, and panel boundaries are not recoverable from box geometry --
-// see lib/panels.js for why, and for how they are recovered from the image.
+// panels right-to-left within a row, rows top-to-bottom. Panel boundaries are
+// not recoverable from box geometry -- see lib/panels.js.
 //
-// Two entry points, deliberately split:
+// Two entry points:
 //
-//   readingOrder()       pure geometry, no image. Bands regions into rows and
-//                        sorts each row right-to-left. Used inside a single
-//                        panel, and as the fallback when panel detection comes
-//                        up empty (borderless page, blank page).
+//   readingOrder()       pure geometry. Bands regions into rows and sorts each
+//                        row right-to-left. Used inside a single panel, and as
+//                        the fallback when panel detection finds nothing.
+//   panelReadingOrder()  the real thing; needs the page image.
 //
-//   panelReadingOrder()  the real thing. Needs the page image.
-//
-// The split keeps the banding sort unit-testable on plain coordinate tuples now
-// that the layer above it needs pixels.
+// The split keeps the banding sort testable on plain coordinate tuples.
 
 import { detectPages, WhiteField } from "./panels.js";
 
@@ -43,18 +37,17 @@ function verticalOverlap(a, b) {
 export function readingOrder(boxes, bandThreshold = BAND_THRESHOLD) {
   if (!boxes.length) return [];
 
-  // Stable by construction: ties on y0 keep their original relative order, which
-  // is what Python's sorted() does and what the fixtures were generated with.
+  // Stable: ties on y0 keep their original relative order, which is what the
+  // fixtures were generated with.
   const indexed = boxes.map((_, i) => i).sort((i, j) => boxes[i][1] - boxes[j][1]);
 
   const bands = [];
   for (const i of indexed) {
     let placed = false;
     for (const band of bands) {
-      // Against the band's seed -- the topmost box, since `indexed` is sorted by
-      // y0 -- not against its accumulated envelope. The envelope grows every
-      // time a slightly lower box joins, so a long row of staggered bubbles
-      // drags the band down the page and swallows the row below it.
+      // Against the band's seed, not its accumulated envelope: the envelope
+      // grows each time a slightly lower box joins, so a row of staggered
+      // bubbles drags the band down the page and swallows the row below.
       if (verticalOverlap(boxes[band[0]], boxes[i]) >= bandThreshold) {
         band.push(i);
         placed = true;
@@ -87,11 +80,10 @@ function sortedSubset(boxes, idxs, bandThreshold) {
 /**
  * Index of the panel owning this centroid.
  *
- * Falls back to the nearest panel centre, which covers a bubble whose middle
- * lands in a gutter because it straddles two panels.
+ * Falls back to the nearest panel centre, for a bubble whose middle lands in a
+ * gutter because it straddles two panels.
  *
- * Exported because grouping needs the same answer ordering does: two text lines
- * in different panels are never the same region, whatever their geometry says.
+ * Exported because grouping needs the same answer ordering does.
  */
 export function panelIndexFor(panels, cx, cy) {
   for (let i = 0; i < panels.length; i++) {

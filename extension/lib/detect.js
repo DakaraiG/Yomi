@@ -1,38 +1,23 @@
 // Text detection: comic-text-detector, ONNX Runtime Web, WebGPU or WASM.
 //
-// REPLACED PaddleOCR, which won the Phase 1 bake-off on boxes alone. The
-// question changed: the overlay stopped covering the Japanese and started
-// erasing it, and erasing needs a per-pixel glyph mask that DB cannot give --
-// its probability map is region-level by construction, which is why unclip()
-// exists. CTD carries a UNet segmentation head next to its detection heads,
-// so one forward pass yields boxes and mask together.
+// Chosen over PaddleOCR, which won the bake-off on boxes alone, because erasing
+// the Japanese needs a per-pixel glyph mask and DB's probability map is
+// region-level by construction (which is why unclip() exists). CTD carries a
+// UNet segmentation head beside its detection heads, so one forward pass yields
+// boxes and mask together, at a cost of ~600ms against a 12-18s translate call.
 //
-// Measured on the fixture pages (tools/bakeoff, `--only ctd-fused,paddle-1536`):
+// GPL-3.0, which the v0.4 rewrite existed to get out of. It is back deliberately
+// and narrowly: weights are fetched at install time and no GPL code is linked,
+// so the three-process wall does not come back. See README.md.
 //
-//                 recall   exact grouping   ms
-//   paddle-1536    92.3%   87.5/92.3/86.4   260
-//   ctd-fused     100.0%   94.1/92.9/86.4   862
-//
-// Recall against fixtures/baseline.json is partly circular -- the baseline is
-// this model's own output from the v0.3 sidecar -- so read 100% as "the port is
-// faithful". The grouping columns are the honest comparison, and they are level
-// or better. The 600ms costs nothing next to a 12-18s translate call.
-//
-// GPL-3.0, which is the licence the v0.4 rewrite existed to get out of. It is
-// back deliberately and narrowly: weights are fetched at install time and no
-// GPL code is linked, so the three-process wall does not come back. See
-// README.md and tools/bakeoff/fetch-models.mjs.
-//
-// Model signature, confirmed against the file rather than assumed:
+// Model signature, confirmed against the file:
 //   in   images   [1,3,1024,1024] float32, RGB, 0-1, letterboxed, pad 114
 //   out  blk      [1,64512,7]     YOLOv5 detections, anchor-decoded
 //   out  seg      [1,1,1024,1024] per-pixel text mask
 //   out  det      [1,2,1024,1024] DBNet-style line head, channel 0 = probability
 //
-// THE INPUT DIMS ARE STATIC. There is no maxSide here and nothing to sweep:
-// every page is squashed to 1024 on its long edge, on every backend. That
-// removes the tuning that mattered most on the DB path and removes the CPU
-// path's only lever with it -- see init().
+// The input dims are static: every page is squashed to 1024 on its long edge on
+// every backend, so there is no working-resolution lever here.
 
 import { toTensor } from "./imageops.js";
 import { probabilityMapToBoxes } from "./db-postprocess.js";
@@ -64,38 +49,27 @@ export class Detector {
   get ready() { return this.#session !== null; }
 
   /**
-   * Load the runtime and the model.
+   * Load the runtime and the model, on WebGPU if it is available.
    *
-   * wasmPaths must point INSIDE the extension. ORT otherwise resolves its .wasm
-   * from a CDN, which an extension cannot load at all -- MV3 forbids remote
-   * code, and the failure surfaces as a fetch error naming a jsdelivr URL,
-   * which reads like a network problem rather than a configuration one.
+   * The WASM fallback is tried explicitly rather than by listing both providers,
+   * so `backend` records what actually ran -- the CPU path is roughly two orders
+   * of magnitude slower, and otherwise both produce the same log line.
    *
-   * WEBGPU FIRST, WASM AS FALLBACK, and the fallback is tried explicitly rather
-   * than by listing both providers, so `backend` records what actually ran.
-   * That distinction is worth the extra few lines: the CPU path is roughly two
-   * orders of magnitude slower here, so "it works but takes a minute a page"
-   * and "it works" are the same log line otherwise.
-   *
-   * numThreads is 1 because multi-threaded WASM needs SharedArrayBuffer, which
+   * That gap is structural: multi-threaded WASM needs SharedArrayBuffer, which
    * needs cross-origin isolation, which an offscreen document does not have.
-   * That is precisely why the CPU path is slow, and why WebGPU matters.
    */
   async init() {
     if (this.#session) return;
 
     const modelUrl = chrome.runtime.getURL(MODEL_PATH);
 
-    // Ask the hardware BEFORE asking ORT.
+    // Ask the hardware before asking ORT: a failed WebGPU session leaves the ORT
+    // module half-initialised, and every later attempt -- including the CPU
+    // fallback -- then fails with "previous call to 'initWasm()' failed", which
+    // reports the corpse rather than the cause.
     //
-    // A failed WebGPU session leaves the ORT module poisoned: its WASM runtime
-    // is half-initialised, and every later attempt -- including the CPU
-    // fallback -- fails with "previous call to 'initWasm()' failed", which
-    // reports the corpse rather than the cause. Probing the adapter first means
-    // the common case (no WebGPU) never touches ORT at all.
-    //
-    // navigator.gpu merely EXISTING is not enough; requestAdapter can still
-    // return null, and does inside contexts without GPU access.
+    // navigator.gpu existing is not enough; requestAdapter still returns null in
+    // contexts without GPU access.
     let adapter = null;
     if (navigator.gpu) {
       try {
@@ -119,7 +93,7 @@ export class Detector {
       }
     }
 
-    // A FRESH module instance for the fallback. Re-importing with a different
+    // A fresh module instance for the fallback: re-importing with a different
     // query string bypasses the module cache, which is the only way to get an
     // ORT whose initWasm has not already failed.
     const ort = await this.#loadOrt(adapter ? "?retry=cpu" : "");
@@ -129,12 +103,9 @@ export class Detector {
     });
     this.backend = "wasm";
 
-    // THE CPU PATH LOST ITS ESCAPE HATCH with the move off PaddleOCR. That
-    // path used to drop the working resolution to 960 and take the 0.4 points
-    // of recall it cost; this model's input dims are static, so a page on
-    // single-threaded WASM is a full 1024x1024 pass through a UNet and there is
-    // no smaller version of it to run. Expect tens of seconds. The warning says
-    // "slow" rather than "reduced resolution" because that is now the truth.
+    // The CPU path has no escape hatch: the model's input dims are static, so a
+    // page on single-threaded WASM is a full 1024x1024 UNet pass with no smaller
+    // version to fall back to. Expect tens of seconds.
     if (!this.initWarning) {
       this.initWarning = navigator.gpu
         ? "WebGPU present but no adapter — running on CPU, expect a slow page"
@@ -147,14 +118,10 @@ export class Detector {
   /**
    * Run one throwaway inference at the shape real pages will use.
    *
-   * On WebGPU the first run at a given input shape compiles a compute shader
-   * for every op in the graph, and for this model that dominates -- the cost
-   * lands on whoever calls first. Paying it at load time means the user's first
-   * page is as fast as their tenth, and it turns "the extension hangs" into "the
-   * extension takes a moment to start", which is a far better failure to have.
-   *
-   * Shape is fixed by the model, so unlike the DB path there is no way for the
-   * warm-up shape to disagree with the one real pages use.
+   * On WebGPU the first run at a given input shape compiles a compute shader per
+   * op, which for this model dominates. Paying it at load time makes the user's
+   * first page as fast as their tenth. Shape is fixed by the model, so the
+   * warm-up cannot disagree with what real pages use.
    */
   async warmUp() {
     if (!this.#session) return;
@@ -173,13 +140,12 @@ export class Detector {
   }
 
   async #loadOrt(cacheBust = "") {
-    // MUST MATCH ORT_ENTRY in tools/bakeoff/install-extension-assets.mjs, which
+    // Must match ORT_ENTRY in tools/bakeoff/install-extension-assets.mjs, which
     // derives the companion .mjs/.wasm variants by reading this exact file.
     const ort = await import(`../vendor/ort/ort.bundle.min.mjs${cacheBust}`);
-    // wasmPaths must point INSIDE the extension. ORT otherwise resolves its
+    // wasmPaths must point inside the extension: ORT otherwise resolves its
     // .wasm from a CDN, which MV3 forbids outright, and the failure surfaces as
-    // a fetch error naming a jsdelivr URL -- which reads like a network problem
-    // rather than a configuration one.
+    // a fetch error naming a jsdelivr URL.
     ort.env.wasm.wasmPaths = chrome.runtime.getURL("vendor/ort/");
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.simd = true;
@@ -193,15 +159,13 @@ export class Detector {
    *
    * @param {{width:number,height:number,data:Uint8ClampedArray}} raster
    * @returns {Promise<{lines:Array<{x0,y0,x1,y1,score}>, seg:Float32Array}>}
-   *   `lines` is one box per text LINE in original pixel coordinates, plus any
-   *   block the line head missed entirely -- grouping them is lib/group.js's
-   *   job. `seg` is the per-pixel text probability at PAGE resolution, one
-   *   float per pixel, row-major.
+   *   `lines` is one box per text line in original pixel coordinates, plus any
+   *   block the line head missed entirely; grouping them is lib/group.js's job.
+   *   `seg` is the per-pixel text probability at page resolution, row-major.
    *
-   * SEG STAYS INSIDE THE OFFSCREEN DOCUMENT. A page-resolution float map is
-   * several megabytes; sending it through chrome.runtime means structured-clone
-   * copies on both sides of a message port for something only buildCleanPlate
-   * ever reads. It is returned here, consumed there, and never serialised.
+   * `seg` must stay inside the offscreen document: a page-resolution float map
+   * is several megabytes, and sending it through chrome.runtime costs a
+   * structured-clone copy on both sides for something only the mask ever reads.
    */
   async detect(raster) {
     if (!this.#session) throw new Error("Detector.init() has not been awaited");
@@ -211,17 +175,13 @@ export class Detector {
     } = this.options;
 
     const { raster: lb, r, nw, nh } = letterbox(raster);
-    // No mean/std: this model takes plain 0-1 RGB, unlike the ImageNet-
-    // normalised DB path it replaced. Normalising anyway costs nothing visible
-    // and quietly halves recall.
+    // No mean/std: this model takes plain 0-1 RGB, and ImageNet normalisation
+    // quietly halves recall rather than failing.
     const tensor = new this.#ort.Tensor(
       "float32", toTensor(lb), [1, 3, CTD_SIZE, CTD_SIZE]);
 
-    // Timed out loud, because this is the one stage whose cost is invisible
-    // otherwise and the one that has actually been slow. On WebGPU the FIRST
-    // run compiles a compute shader per op, so a first call costing tens of
-    // seconds and later ones costing under a second is expected -- and is a
-    // completely different problem from every call being slow.
+    // Timed out loud: a slow first call is shader compilation and expected,
+    // while every call being slow is a different problem entirely.
     const label = `[yomi] inference ${CTD_SIZE}x${CTD_SIZE} on ${this.backend}`;
     console.time(label);
     const result = await this.#session.run({ [this.#session.inputNames[0]]: tensor });
@@ -229,9 +189,8 @@ export class Detector {
 
     const [blkName, segName, detName] = this.#session.outputNames;
 
-    // Line boxes from the DB-style head, through the same post-processing the
-    // PaddleOCR path used -- the head is the same shape of thing, so the
-    // threshold/unclip machinery ports over unchanged.
+    // The line head is DB-style, so the PaddleOCR path's threshold/unclip
+    // post-processing applies unchanged.
     const lineMap = cropChannel(result[detName].data,
       { size: CTD_SIZE, nw, nh, channel: 0 });
     const lines = probabilityMapToBoxes(lineMap, {
@@ -240,8 +199,8 @@ export class Detector {
       binaryThreshold,
       boxThreshold,
       unclipRatio,
-      // Boxes come back in the letterboxed frame; everything downstream works
-      // in original pixels, so undo the resize here and nowhere else.
+      // Boxes come back in the letterboxed frame and everything downstream works
+      // in original pixels, so the resize is undone here and nowhere else.
       scaleX: width / nw,
       scaleY: height / nh,
       imageWidth: width,
@@ -254,9 +213,8 @@ export class Detector {
       r, width, height, confThreshold, nmsThreshold
     });
 
-    // Crop the pad off BEFORE scaling to page size, or the mask lands offset by
-    // the padding's share of the edge -- which looks like a plausible small
-    // misalignment rather than like a bug, and erases the wrong pixels.
+    // Crop the pad off before scaling to page size, or the mask lands offset by
+    // the padding's share of the edge and erases the wrong pixels.
     const seg = resizeMap(
       cropChannel(result[segName].data, { size: CTD_SIZE, nw, nh }),
       nw, nh, width, height);

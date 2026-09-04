@@ -1,18 +1,13 @@
 // Download the bake-off's candidate models into weights/bakeoff/.
 //
-// EVERY ENTRY RECORDS ITS LICENCE, and that is no longer only bookkeeping:
-// comic-text-detector's GPL-3.0 is what forced v0.3's three-process
-// architecture, so the roster was originally MIT/Apache-2.0/BSD only.
+// Every entry records its licence, and the roster is MIT/Apache-2.0/BSD with one
+// deliberate exception: `ctd`, which is GPL-3.0. The extension ships weights
+// fetched at install time and never links GPL code, and no permissive model
+// produces the per-pixel glyph mask that erasing the Japanese needs. The
+// obligation is still real -- see README.md.
 //
-// That gate was lifted deliberately, by Dak, for `ctd` and nothing else. The
-// reasoning: v0.3 needed a separate PROCESS because Python code linked the GPL
-// library, while v0.4 ships weights fetched at install time and never links
-// GPL code -- and no permissive model produces a per-pixel glyph mask, which is
-// what erasing the Japanese needs. The wall does not come back, but the
-// obligation is real; see README.md.
-//
-// This is a one-off, not a policy change. A new candidate that is not
-// MIT/Apache-2.0/BSD still does not get added without the same conversation.
+// A one-off, not a policy change. Any other non-permissive candidate needs the
+// same argument made again.
 //
 //   node fetch-models.mjs            download everything missing
 //   node fetch-models.mjs paddle-v4  download one

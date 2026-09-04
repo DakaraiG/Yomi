@@ -1,9 +1,8 @@
 // Node-side wrapper around extension/lib/render.js.
 //
-// The renderer itself ships in the extension and knows nothing about where its
-// canvas comes from -- OffscreenCanvas there, @napi-rs/canvas here. This file
-// supplies the canvas and nothing else, so what the bake-off draws is exactly
-// what the extension will send to the model.
+// The renderer ships in the extension and knows nothing about where its canvas
+// comes from -- OffscreenCanvas there, @napi-rs/canvas here. This supplies the
+// canvas and nothing else, so the bake-off draws what the extension sends.
 
 import { createCanvas } from "@napi-rs/canvas";
 import {

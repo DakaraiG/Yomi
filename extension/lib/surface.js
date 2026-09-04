@@ -5,21 +5,14 @@
 const LUM = (r, g, b) => r * 0.299 + g * 0.587 + b * 0.114;
 
 /**
- * Snap a near-neutral surface to stark white or black.
+ * Snap a near-neutral surface to stark white or black, as official scans letter.
  *
- * Official scans letter on pure white with pure black text, and that is what
- * this is emulating. A measured 252 is not white: against a 255 bubble it is a
- * grey patch, and no amount of measuring precision fixes that, because the
- * thing being matched is not really 252 either -- it is 255 with JPEG noise on
- * it. Past a point, committing to the stark value beats getting closer to the
- * average.
+ * A measured 252 is not white; it is 255 with JPEG noise on it, so committing to
+ * the stark value beats getting closer to the average.
  *
- * The neutrality guard is what keeps this from undoing the measurement it sits
- * on: a cream or toned bubble has a real tint across its channels and keeps it.
- * A grey narration panel is far from either end and keeps its grey. On the
- * fixture pages this snaps 65 of 68 regions -- every one of them measured
- * between 250 and 254 -- and the three it does not touch are all artwork that
- * is outlined rather than filled.
+ * The neutrality guard keeps this from undoing the measurement underneath: a
+ * cream or toned bubble has a real tint across its channels and keeps it, and a
+ * grey narration panel is far from either end and keeps its grey.
  */
 export const SNAP_WHITE = 0.94;
 export const SNAP_BLACK = 0.06;
@@ -53,12 +46,12 @@ export function otsuThreshold(hist, total) {
 }
 
 /**
- * Mean and spread of luminance over EVERY pixel, 0-1.
+ * Mean and spread of luminance over every pixel, 0-1.
  *
- * Deliberately not measureBackground: the box-widening probe asks "is this
- * strip still the surface I started on", and a strip clipping a bubble outline
- * still has a majority of interior pixels, so a background-class measurement
- * would call it a match and walk straight off the bubble.
+ * Deliberately not measureBackground: the box-widening probe asks whether a
+ * strip is still the surface it started on, and a strip clipping a bubble
+ * outline still has a majority of interior pixels, so a background-class
+ * measurement would call it a match and walk straight off the bubble.
  */
 export function stripStats(data, stride = 16) {
   let n = 0, s = 0, s2 = 0;
@@ -78,15 +71,13 @@ export function stripStats(data, stride = 16) {
  * Describe the background of one region.
  *
  * @param {Uint8ClampedArray} data RGBA for the region's bounding box.
- * @param {number} stride Bytes between sampled pixels. Every 4th pixel (16) is
- *   plenty of signal and keeps this off the critical path.
+ * @param {number} stride Bytes between sampled pixels. Every 4th pixel is plenty
+ *   of signal and keeps this off the critical path.
  * @returns {{fill:number[], bgLum:number, bgStd:number, bgShare:number}|null}
- *   `fill` is the mean RGB of the background pixels -- what to cover the region
- *   with -- the colour AT the most common background value, not the average of
- *   all of them. `bgLum` is that value 0-1, which decides ink colour. `bgStd`
- *   is the luminance standard deviation across the whole background class 0-1:
- *   how far from uniform the surface is, i.e. how much of a lie any fill would
- *   be. `bgShare` is the fraction of the region they account for -- see below.
+ *   `fill` is the mean RGB of the pixels at the most common background value.
+ *   `bgLum` is that value 0-1, which decides ink colour. `bgStd` is the
+ *   luminance spread across the whole background class, and `bgShare` the
+ *   fraction of the region that class accounts for.
  */
 export function measureBackground(data, stride = 16) {
   const hist = new Uint32Array(256);
@@ -106,32 +97,23 @@ export function measureBackground(data, stride = 16) {
   const k = upper ? n - below : below;
   if (k === 0) return null;
 
-  // THE FILL COLOUR IS THE MODE, NOT THE MEAN.
-  //
-  // Averaging the whole background class is what made every fill grey. A glyph
-  // does not end at a hard edge -- it fades out through antialiasing and JPEG
-  // ringing, and that ramp lands on the background side of any threshold. On
-  // the fixture pages the true surface is pure white (mode 253-255) on 67 of 68
-  // regions, while the class mean came out 6-9 levels darker, and below 245 on
-  // 18 of them. A 240 patch on a 255 bubble is a visible grey rectangle.
-  //
-  // So the surface is the most COMMON background value, and the fill is the
-  // average colour of just the pixels sitting at it -- which keeps the tint of
-  // a cream or toned bubble while ignoring the ramp entirely.
+  // The mode, not the mean. A glyph fades out through antialiasing and JPEG
+  // ringing, and that ramp lands on the background side of any threshold, which
+  // pulls the class mean several levels dark. Taking the most common value and
+  // averaging only the pixels at it keeps a cream bubble's tint and ignores the
+  // ramp.
   const from = upper ? t + 1 : 0;
   const to = upper ? 255 : t;
   let peak = from;
   for (let i = from; i <= to; i++) if (hist[i] > hist[peak]) peak = i;
 
-  // Second pass: luminance moments over the whole class (that spread is the
-  // busyness signal, and it is meant to include the ramp), and colour over a
-  // tight band at the peak.
+  // Second pass: luminance moments over the whole class, which is meant to
+  // include the ramp, and colour over a tight band at the peak.
   //
-  // Classified on the SAME truncated value the histogram was built from. Using
-  // the float here instead puts every pixel whose luminance falls inside the
-  // threshold's own bin on the wrong side -- and since Otsu returns the lowest
-  // tying threshold, that bin is usually the text itself, which quietly dragged
-  // glyph pixels into the background and turned a cream bubble into "artwork".
+  // Classified on the same truncated value the histogram was built from. The
+  // float puts every pixel inside the threshold's own bin on the wrong side, and
+  // since Otsu returns the lowest tying threshold, that bin is usually the text
+  // -- which drags glyph pixels into the background class.
   const BAND = 6;
   let sl = 0, sl2 = 0;
   let bn = 0, br = 0, bg = 0, bb = 0;
@@ -156,10 +138,9 @@ export function measureBackground(data, stride = 16) {
     bgLum: +(peak / 255).toFixed(3),
     bgStd: +(sd / 255).toFixed(3),
     bgShare: +(k / n).toFixed(3),
-    // How much of the background sits AT the surface value rather than merely
-    // on that side of the split. This is the honest test for "is there one
-    // surface here": a white page reads ~0.9 whether or not there is a bubble
-    // drawn on it, while artwork has no dominant value to concentrate at.
+    // How much of the background sits at the surface value rather than merely on
+    // that side of the split -- the test for whether there is one surface here
+    // at all, since artwork has no dominant value to concentrate at.
     bgPeak: +(bn / k).toFixed(3)
   };
 }

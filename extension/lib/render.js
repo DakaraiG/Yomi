@@ -1,16 +1,10 @@
 // Numbered-box rendering.
 //
-// Descended from sidecar/app/main.py's /detect/debug, which drew boxes and
-// reading-order numbers so a human could judge detection. In v0.4 the same
-// drawing becomes load-bearing rather than diagnostic: with no local OCR, the
-// numbered render is HOW the model knows which text belongs to which polygon.
-// It reads the number off the page and keys its transcription to it.
-//
-// That changes what the drawing has to achieve. The debug render wants boxes
-// that shout. The handoff render has to be legible to the model while hiding
-// nothing -- because the model is transcribing the Japanese underneath, and a
-// label sitting on a glyph is a glyph it cannot read. Every choice below is
-// downstream of that one constraint.
+// With no local OCR, the numbered render is how the model knows which text
+// belongs to which polygon: it reads the number off the page and keys its
+// transcription to it. So the handoff render has to be legible to the model
+// while hiding nothing -- a label sitting on a glyph is a glyph it cannot
+// transcribe. Every choice in HANDOFF is downstream of that.
 
 /** Human-facing: thick red boxes, big numbers. Judge detection by eye. */
 export const DEBUG = {
@@ -24,13 +18,9 @@ export const DEBUG = {
 };
 
 /**
- * Model-facing.
- *
- * Magenta because manga is greyscale: nothing on the page competes with it, so
- * the model cannot mistake a label for artwork or a label's edge for linework.
- *
- * Labels sit OUTSIDE their box. Inside, a number covers the first character of
- * the very region it identifies -- the one piece of text it must not hide.
+ * Model-facing. Magenta because manga is greyscale, so nothing on the page
+ * competes with it; labels outside the box because a number inside covers the
+ * first character of the very region it identifies.
  */
 export const HANDOFF = {
   strokeWidth: 1.5,
@@ -52,19 +42,14 @@ function overlaps(a, b) {
 }
 
 /**
- * Where the label goes.
+ * Where the label goes: clear of its own box and of every other region's, since
+ * on a page of vertical columns a label to the left of column N lands squarely
+ * on column N+1's text.
  *
- * Outside its own box, and -- the part that matters -- outside every OTHER
- * region's box too. Clearing only its own box is not enough: on a page of
- * vertical columns, a label placed to the left of column N lands squarely on
- * column N+1's text, and hiding a neighbour's glyphs is exactly as bad as
- * hiding your own. Manga margins are dense enough that this happens on a
- * typical page rather than a pathological one.
- *
- * Candidates are tried in order of preference and the first clean one wins. If
- * every position collides -- a region ringed by others -- the last is used
- * anyway, because a label drawn off-canvas or omitted is worse: the model sees
- * a box with no number and answers for it regardless, with an id it invented.
+ * Candidates are tried in preference order and the first clean one wins. A
+ * region ringed by others takes the last candidate anyway -- omitting the label
+ * is worse, because the model sees a box with no number and answers for it with
+ * an id it invented.
  */
 function labelPosition(box, chipW, chipH, canvasW, canvasH, outside, others) {
   const candidates = outside
@@ -94,9 +79,9 @@ function labelPosition(box, chipW, chipH, canvasW, canvasH, outside, others) {
  * @param {object} opts
  * @param {*} opts.canvas       a canvas to draw into, sized to the image
  * @param {*} opts.image        anything drawImage accepts
- * @param {Array<{x0,y0,x1,y1}>} opts.boxes  pixel coords, IN READING ORDER --
- *   the label is the array index, and that index is the id the model answers
- *   with, so the caller must order before rendering
+ * @param {Array<{x0,y0,x1,y1}>} opts.boxes  pixel coords, in reading order: the
+ *   label is the array index, and that index is the id the model answers with,
+ *   so the caller must order before rendering
  * @param {object} [opts.style]
  * @param {string[]} [opts.labels]  override the numbering
  */

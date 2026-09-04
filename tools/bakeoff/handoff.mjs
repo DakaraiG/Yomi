@@ -1,10 +1,8 @@
-// Build the Phase 3 handoff image for a page: detect, group, order, number.
+// Build the handoff image for a page: detect, group, order, number.
 //
-// This is the exact pipeline the extension will run, minus the API call, so the
-// PNG it writes is the image the model will actually be shown. That matters --
-// the whole question in Phase 3 is whether the model can read these labels
-// without the boxes hiding the Japanese it has to transcribe, and the only way
-// to judge it is to look at the real thing.
+// The extension's pipeline minus the API call, so the PNG it writes is the image
+// the model is actually shown -- the only way to judge whether the labels are
+// readable without the boxes hiding the Japanese underneath.
 //
 //   node handoff.mjs                    every fixture page
 //   node handoff.mjs --page ynko.jpg

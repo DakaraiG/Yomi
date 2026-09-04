@@ -1,20 +1,15 @@
 // Candidate: classical CV. No model, no weights, no licence question at all.
 //
-// The observation this rests on: a speech bubble is a CLOSED LIGHT REGION
-// BOUNDED BY A DARK CONTOUR. That makes it findable without learning anything,
-// and the enclosure does the hard part for free -- flood the light pixels and
-// the page margin is one component, each bubble interior is another, because
-// the drawn outline severs them. The margin is the component touching the
-// image edge, so dropping edge-touching components drops the margin and keeps
-// the bubbles.
+// Rests on a speech bubble being a closed light region bounded by a dark
+// contour, which makes it findable without learning anything: flood the light
+// pixels and the drawn outline severs each bubble interior from the page margin,
+// which is the component touching the image edge.
 //
-// Worth measuring even if crude, per the brief: if it lands anywhere near the
-// learned detectors it wins on every other axis -- nothing to download, nothing
-// to run in an offscreen document, no ONNX runtime in the extension at all.
+// Crude, but if it lands near the learned detectors it wins on every other axis
+// -- nothing to download and no ONNX runtime in the extension at all.
 //
-// What it cannot do, stated up front so the numbers are read correctly:
-// on-art SFX (no bubble to find), open-ended bubbles that bleed off the panel
-// edge, and bubbles over dark screentone.
+// What it cannot do, so the numbers are read correctly: on-art SFX (no bubble to
+// find), bubbles that bleed off the panel edge, bubbles over dark screentone.
 
 import { toGray } from "../lib/image.mjs";
 import { connectedComponents } from "../lib/components.mjs";
@@ -57,19 +52,16 @@ export default {
       const bh = blob.y1 - blob.y0;
       if (blob.area / (bw * bh) < MIN_FILL_RATIO) continue;
 
-      // The bubble INTERIOR is the component; the text is the ink inside it.
-      // Report the text's extent, because that is what comic-text-detector
-      // reports and what the overlay expects -- the extension re-expands it by
-      // BOX_EXPAND at render time.
+      // The component is the bubble interior; report the extent of the ink
+      // inside it, which is what the baseline reports and the overlay expects.
       const id = i + 1;
       let tx0 = blob.x1, ty0 = blob.y1, tx1 = blob.x0, ty1 = blob.y0, ink = 0;
 
-      // Ink pixels are not IN the light component -- they are the holes in it,
-      // so they carry label 0. But so does the bubble's own drawn OUTLINE, and
-      // counting that gives a box the size of the bubble rather than of the
-      // text. Scanning strictly BETWEEN the component's first and last pixel on
-      // each row excludes the outline, because the outline is what terminates
-      // the row's span in the first place.
+      // Ink pixels are holes in the light component, so they carry label 0 --
+      // but so does the bubble's own outline, and counting that gives a box the
+      // size of the bubble. Scanning strictly between the component's first and
+      // last pixel on each row excludes it, the outline being what terminates
+      // the span.
       for (let y = blob.y0; y < blob.y1; y++) {
         const row = y * width;
 

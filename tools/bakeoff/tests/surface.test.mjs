@@ -1,10 +1,7 @@
 // The fill decision: what surface is a region sitting on?
 //
-// These are synthetic rasters, not real pages, and they are here to BRACKET the
-// two thresholds rather than to prove them. Each case pins one end of a range:
-// a grey gradient panel must come out fillable (it is the defect this whole
-// measurement exists to fix), continuous artwork must not, and the four flat
-// surfaces must survive both tests. Real tuning happens against the per-region
+// Synthetic rasters that bracket the two thresholds rather than proving them:
+// each case pins one end of a range. Real tuning happens against the per-region
 // lum/sd/share table content.js logs to the console.
 //
 //   node --test tests/
@@ -48,8 +45,8 @@ test("white bubble, black text: fills white", () => {
 });
 
 test("grey gradient panel fills GREY, not white and not nothing", () => {
-  // The reported defect. Under the old near-white test this region scored ~0
-  // and got no fill at all, so the Japanese stayed visible under the English.
+  // A near-white test scores this region ~0 and leaves the Japanese visible
+  // under the English.
   const m = measureBackground(raster(W, H, (x, y) => {
     const g = 150 + Math.round((y / H) * 40) + noise(x, y);
     return glyph(x, y) ? [20, 20, 20] : [g, g, g];
@@ -68,8 +65,8 @@ test("inverted panel: white text on black reads as a dark surface", () => {
 
 test("cream bubble keeps its tint", () => {
   // Regression: classifying the second pass on the float luminance while the
-  // histogram used the truncated one put the glyphs' own bin on the background
-  // side, which dragged this fill to rgb(204,197,182) and marked it artwork.
+  // histogram uses the truncated one puts the glyphs' own bin on the background
+  // side, dragging this fill dark and marking it artwork.
   const m = measureBackground(
     raster(W, H, (x, y) => glyph(x, y) ? [30, 25, 20] : [238, 230, 214]));
   assert.equal(isBusy(m), false);
@@ -85,11 +82,10 @@ test("continuous artwork is busy, and outlines instead", () => {
 });
 
 test("hard screentone survives the share floor -- SFX kind must catch it", () => {
-  // The one case the two measures cannot separate from dense text on a flat
-  // surface: a 50/50 dot field splits into two internally-uniform classes, so
-  // sd sees nothing and share lands at ~0.58 against dense text's ~0.60. This
-  // asserts the gap is real, which is WHY "SFX always outlines" is a rule about
-  // kind rather than another threshold.
+  // The one case these measures cannot separate from dense text on a flat
+  // surface: a 50/50 dot field splits into two internally-uniform classes, so sd
+  // sees nothing and share lands within a couple of points of dense text. The
+  // gap is too small to threshold on, which is why kind decides instead.
   const tone = measureBackground(raster(W, H, (x, y) => {
     const v = ((x * 3 + y * 5) % 40 < 20) ? 30 : 235;
     return glyph(x, y) ? [0, 0, 0] : [v, v, v];
@@ -111,9 +107,8 @@ test("a flat region with no text at all is uniform", () => {
 
 // --- stark white ------------------------------------------------------------
 //
-// The scans this imitates letter in pure black on pure white. Matching a
-// bubble's measured average instead leaves a visibly grey patch on it, because
-// the bubble is not really 252 -- it is 255 with JPEG noise on it.
+// A bubble measuring 252 is 255 with JPEG noise on it, so matching the measured
+// average leaves a visibly grey patch on it.
 
 test("a near-white bubble is filled with stark white, not its average", () => {
   for (const v of [250, 252, 253, 254, 255]) {
@@ -132,8 +127,7 @@ test("a tinted bubble keeps its tint", () => {
 });
 
 test("a grey panel keeps its grey", () => {
-  // The Task 1 case: far enough from either end that snapping never applies,
-  // which is what keeps a gradient narration panel filling with grey.
+  // Far enough from either end that snapping never applies.
   assert.deepEqual(snapFill([170, 170, 170]), [170, 170, 170]);
 });
 

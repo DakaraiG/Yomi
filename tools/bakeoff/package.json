@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Phase 1 detector comparison harness. Dev tooling only — the shipped extension stays dependency-free.",
+  "description": "Detector comparison harness. Dev tooling only — the shipped extension stays dependency-free.",
   "license": "MIT",
   "scripts": {
     "fetch-models": "node fetch-models.mjs",

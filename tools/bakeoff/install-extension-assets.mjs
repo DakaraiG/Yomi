@@ -2,14 +2,13 @@
 //
 //   node install-extension-assets.mjs
 //
-// ~18MB of ONNX Runtime and one 91MB detection model. Both are reproducible --
-// the runtime from npm, the model from the pinned URL in fetch-models.mjs -- so
-// they are fetched rather than committed, the same way the v0.3 detector
-// weights always were. The model being GPL-3.0 is a second reason not to commit
-// it; see fetch-models.mjs.
+// ~18MB of ONNX Runtime and one 91MB detection model, both reproducible -- the
+// runtime from npm, the model from the pinned URL in fetch-models.mjs -- so they
+// are fetched rather than committed. The model being GPL-3.0 is a second reason
+// not to commit it.
 //
-// The extension does not start without them: the offscreen document fails on
-// its first import with a module-not-found for ort.wasm.bundle.min.mjs.
+// The extension does not start without them: the offscreen document fails on its
+// first import with a module-not-found.
 
 import { copyFile, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -21,37 +20,28 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const EXTENSION = join(HERE, "..", "..", "extension");
 const ORT_DIST = join(HERE, "node_modules", "onnxruntime-web", "dist");
 
-// The single-threaded SIMD build. Multi-threaded WASM needs SharedArrayBuffer,
-// which needs cross-origin isolation, which an offscreen document does not have
-// -- the "threaded" in the filename is the build's name, not a request for
-// threads; numThreads is pinned to 1 in lib/detect.js.
+// The general bundle: WASM and WebGPU from one binary. "threaded" in the
+// companion filenames is the build's name, not a request for threads --
+// multi-threaded WASM needs SharedArrayBuffer, which needs cross-origin
+// isolation, which an offscreen document does not have.
 //
-// ALL THREE FILES ARE REQUIRED, which the naming actively hides. "bundle" does
-// not mean the WASM glue is inlined: ort.wasm.bundle.min.mjs still dynamically
-// imports ort-wasm-simd-threaded.mjs at load time, and shipping only the .wasm
-// fails as "no available backend found. ERR: [wasm] TypeError: Failed to fetch
-// dynamically imported module" -- which reads like a WASM or CSP problem rather
-// than a missing 24KB file.
+// All three files are required, which the naming hides: "bundle" does not mean
+// the WASM glue is inlined, and the entry still dynamically imports its .mjs
+// companion at load time. Shipping only the .wasm fails as "no available backend
+// found ... Failed to fetch dynamically imported module", which reads like a
+// WASM or CSP problem rather than a missing 24KB file.
 //
-// The general bundle: WASM and WebGPU from one binary. WebGPU matters because
-// the CPU path is single-threaded, and single-threaded inference on a 1536px
-// page takes tens of seconds.
-//
-// MUST MATCH the import in extension/lib/detect.js.
+// Must match the import in extension/lib/detect.js.
 const ORT_ENTRY = "ort.bundle.min.mjs";
 
 /**
- * Which companion files this entry point needs -- READ FROM IT, not hardcoded.
+ * Which companion files this entry point needs, read from it rather than
+ * hardcoded, so changing ORT_ENTRY cannot desynchronise from what it loads.
  *
- * Hardcoding cost two rounds of the same bug. ORT ships four interchangeable
- * WASM variants (plain, jsep, asyncify, jspi) and each entry point dynamically
- * imports exactly one pair, with no relationship to its own name:
- * ort.bundle.min.mjs wants jsep, ort.webgpu.bundle.min.mjs wants asyncify.
- * Ship the wrong pair and it fails at runtime as "no available backend found",
- * naming neither the file nor the variant.
- *
- * Deriving them means changing ORT_ENTRY can never desynchronise from the files
- * that entry point actually loads.
+ * ORT ships four interchangeable WASM variants (plain, jsep, asyncify, jspi) and
+ * each entry point imports exactly one pair, with no relationship to its own
+ * name. The wrong pair fails at runtime as "no available backend found", naming
+ * neither the file nor the variant.
  */
 async function companionsOf(entry) {
   const source = await readFile(join(ORT_DIST, entry), "utf8");
@@ -59,11 +49,9 @@ async function companionsOf(entry) {
   return [...new Set(found)];
 }
 
-// comic-text-detector: GPL-3.0, 91MB, and the only candidate that returns a
-// per-pixel text mask -- which is what lib/inpaint.js needs to erase the
-// Japanese rather than cover it. It replaced the Phase 1 winner (PaddleOCR DB
-// mobile, Apache-2.0, 4.7MB) when the question changed from "which boxes" to
-// "how do we repair what is under them". See lib/detect.js.
+// comic-text-detector: GPL-3.0, 91MB, and the only candidate returning the
+// per-pixel text mask lib/inpaint.js needs to erase the Japanese rather than
+// cover it.
 const MODEL = "ctd";
 
 async function exists(path) {
@@ -81,15 +69,14 @@ async function main() {
     process.exit(1);
   }
 
-  // Clear out variants left by a previous entry point, so a switch does not
-  // leave 25MB of the old one behind looking authoritative.
+  // Clear variants left by a previous entry point, so a switch does not leave
+  // 25MB of the old one behind looking authoritative.
   for (const stale of await readdir(join(EXTENSION, "vendor", "ort"))) {
     if (/^ort/.test(stale)) await rm(join(EXTENSION, "vendor", "ort", stale));
   }
 
-  // Same for models. The extension loads exactly one, by name, from
-  // lib/detect.js -- a leftover from the previous detector is 5-100MB of dead
-  // weight that looks like it is in use.
+  // Same for models: the extension loads exactly one by name, so a leftover from
+  // a previous detector is dead weight that looks like it is in use.
   for (const stale of await readdir(join(EXTENSION, "models"))) {
     if (stale !== MODELS[MODEL].file && /\.onnx$/.test(stale)) {
       await rm(join(EXTENSION, "models", stale));

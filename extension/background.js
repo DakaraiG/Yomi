@@ -1,26 +1,18 @@
-// Yomi service worker.
-//
-// v0.4: a thin router. It owns three things a page cannot -- cross-origin
-// fetches, the API key, and the cache -- and delegates everything else. The
-// heavy work (detection, grouping, ordering, the numbered render) lives in the
-// offscreen document, because the model session takes seconds to build and this
-// worker gets killed on idle.
+// Yomi service worker: owns what a page cannot -- cross-origin fetches, the API
+// key, the cache -- and routes everything else.
 //
 //   retrieval ladder  -> offscreen: detect + group + order + number
 //                     -> provider: transcribe + translate
 //                     -> merge onto local geometry -> overlay
 //
-// IMAGE RETRIEVAL IS A LADDER, not a single method. Manga hosts vary from
-// wide-open to actively hostile, and the failure is always the same 403, so the
-// only way to know which method works is to try them in order.
+// Detection lives in the offscreen document because the model session takes
+// seconds to build and this worker is killed on idle.
 //
-// Why no single method suffices:
-//   - A service-worker fetch bypasses CORS (host_permissions) but sends no
-//     Referer, so Referer-based hotlink protection rejects it.
-//   - A content-script fetch sends the page's Referer and would pass, but since
-//     Chrome 85 content scripts are subject to CORS, and image CDNs don't send
-//     Access-Control-Allow-Origin.
-// Each approach fails on exactly what the other solves. Hence tier 2.
+// Retrieval is a ladder because no single method covers every host: a worker
+// fetch bypasses CORS but sends no Referer, so hotlink protection rejects it;
+// a content-script fetch carries the page's Referer but is subject to CORS,
+// which image CDNs do not answer. Both failures look like the same 403, so the
+// tiers are tried in order.
 
 import { base64ToBytes, bytesToBase64 } from "./lib/bytes.js";
 import { contentHash, get as cacheGet, set as cacheSet } from "./lib/cache.js";
@@ -33,14 +25,9 @@ import {
   clearBox, diffusionInpaint, backgroundStructure, STRUCTURE_THRESHOLD
 } from "./lib/inpaint.js";
 
-// A RANGE, not a single id.
-//
-// Concurrent translations each need their own Referer rule. Sharing one id
-// means the second request's rule replaces the first's before the first has
-// fetched, and the first's teardown then removes the second's -- so BOTH fall
-// through to the screenshot tier with a 403, on hosts where tier 2 works
-// perfectly in isolation. The bug only appears once pages are translated in
-// parallel, and it looks like the CDN getting stricter.
+// A range, not a single id: concurrent translations each need their own Referer
+// rule, and on a shared id each translation's teardown removes the other's, so
+// both fall through to the screenshot tier with a 403.
 const DNR_RULE_BASE = 8801;
 const DNR_RULE_SLOTS = 16;
 let dnrCursor = 0;
@@ -50,22 +37,19 @@ function nextRuleId() {
   return DNR_RULE_BASE + dnrCursor;
 }
 
-// --- tier 1: direct fetch --------------------------------------------------
-// Works on: permissive hosts, blob: and data: URLs (some readers build object
-// URLs in JS, which are already in memory -- these come back in single-digit ms).
+/** Tier 1: plain fetch. Covers permissive hosts, plus blob: and data: URLs. */
 async function fetchDirect({ imageUrl }) {
   const r = await fetch(imageUrl);
   if (!r.ok) throw new Error(`direct ${r.status}`);
   return { buffer: await r.arrayBuffer(), mimeType: r.headers.get("content-type") };
 }
 
-// --- tier 2: fetch with a spoofed Referer ----------------------------------
-// Rewrites our own request headers so it looks like an ordinary in-page image
-// load. Handles the common case: CDNs that check Referer.
-//
-// SAFARI HAS NO declarativeNetRequest modifyHeaders, so this tier is simply
-// absent there rather than broken -- hence the capability check rather than a
-// hard dependency. On Safari the ladder is tier 1 then tier 3.
+/**
+ * Tier 2: fetch disguised as an in-page image load, for CDNs that check Referer.
+ *
+ * Safari has no declarativeNetRequest modifyHeaders, so the capability check
+ * makes this tier absent there rather than broken.
+ */
 async function fetchWithReferer({ imageUrl, pageUrl }) {
   if (!chrome.declarativeNetRequest?.updateSessionRules) {
     throw new Error("declarativeNetRequest unavailable on this browser");
@@ -99,25 +83,21 @@ async function fetchWithReferer({ imageUrl, pageUrl }) {
     if (!r.ok) throw new Error(`referer ${r.status}`);
     return { buffer: await r.arrayBuffer(), mimeType: r.headers.get("content-type") };
   } finally {
-    // Always tear our OWN rule down. A lingering rule that rewrites Referer on
-    // unrelated requests is a genuinely nasty bug to track down later.
+    // A lingering rule rewrites Referer on unrelated requests.
     await chrome.declarativeNetRequest.updateSessionRules({
       removeRuleIds: [ruleId]
     });
   }
 }
 
-// --- tier 3: screenshot the rendered page ----------------------------------
-// The nuclear option. No fetch at all, so nothing to block -- we read the pixels
-// Chrome already painted. Works everywhere, including <canvas> readers with no
-// <img> to point at.
-//
-// COSTS, which are real:
-//   - Only what is on screen. A tall page scrolled halfway gives you half a page.
-//   - Resolution is viewport x devicePixelRatio, not native. On a retina display
-//     that is often ~2x and adequate; on an external 1080p monitor it may not be.
-//     Panel gutters are 3-5px at native, and panel detection reads drawn borders,
-//     so this degrades reading order quietly rather than loudly.
+/**
+ * Tier 3: read the pixels Chrome already painted -- no fetch, so nothing to
+ * block, and it works on <canvas> readers with no <img> to point at.
+ *
+ * Costs: only what is on screen, at viewport x devicePixelRatio rather than
+ * native resolution. Panel gutters are 3-5px at native, and panel detection
+ * reads drawn borders, so below native this degrades reading order quietly.
+ */
 async function captureFromScreen({ tabId, rect, dpr }) {
   if (!rect) throw new Error("no rect supplied");
   if (rect.top < 0 || rect.bottom > rect.viewportHeight) {
@@ -139,10 +119,8 @@ async function captureFromScreen({ tabId, rect, dpr }) {
   // Extension-origin pixels, so nothing is tainted.
   const blob = await canvas.convertToBlob({ type: "image/png" });
 
-  // A capture far smaller than a manga page is not a page. Zoomed-out readers
-  // and partially-scrolled images both produce one, and it detects as zero
-  // regions -- which reads as "this page has no text" rather than "we
-  // photographed a thumbnail".
+  // A thumbnail-sized capture detects as zero regions, which reads as "this
+  // page has no text" rather than as a bad capture.
   if (sw < 400 || sh < 400) {
     throw new Error(
       `screenshot too small (${sw}x${sh}) — zoom in or scroll the page into view`);
@@ -177,9 +155,9 @@ let offscreenReady = null;
 /**
  * Create the offscreen document once.
  *
- * Guarded by a shared promise: two pages translated in quick succession both
- * reach here, and createDocument throws if one already exists. The check-then-
- * create is not atomic, so the promise is what actually prevents the race.
+ * The check-then-create is not atomic, so the shared promise -- not the
+ * existence check -- is what stops two concurrent translations from both
+ * calling createDocument, which throws if a document already exists.
  */
 function ensureOffscreen() {
   offscreenReady ??= (async () => {
@@ -204,16 +182,12 @@ function ensureOffscreen() {
 /**
  * Hand the bytes to the offscreen document and get the numbered page back.
  *
- * Bytes cross as base64 rather than as an ArrayBuffer: extension messages are
- * serialised, and a buffer arrives at the other end as an empty object with no
- * error raised. It costs a copy and about 33% in size, which is the price of
- * the boundary.
+ * Bytes cross as base64, not as an ArrayBuffer: extension messages are
+ * serialised, and a buffer arrives as an empty object with no error raised.
  *
- * The retry is for a real race. createDocument resolves once the document
- * EXISTS, not once its module script has run, so the first message can arrive
- * before the listener is registered and comes back as "Could not establish
- * connection" -- which looks like a missing offscreen document rather than a
- * timing problem, and only on the first translation after the worker restarts.
+ * The retry covers createDocument resolving once the document exists but before
+ * its module script has registered the listener, which surfaces as "Could not
+ * establish connection" on the first translation after a worker restart.
  */
 async function preparePage(buffer, mimeType) {
   const message = {
@@ -240,37 +214,16 @@ async function preparePage(buffer, mimeType) {
 
 // --- background sampling ---------------------------------------------------
 //
-// The measurement itself lives in lib/surface.js; this is the part that needs
-// the image bytes, which we already hold here in extension origin, so nothing
-// is tainted.
+// The measurement lives in lib/surface.js; this is the part that needs the image
+// bytes, which are held here in extension origin so nothing is tainted.
 //
-// The fill decision used to hang on the SPREAD of the background (BUSY_STD)
-// and how much of the region it accounted for (MIN_SHARE). Both are gone: on
-// ynko4 the spread runs 0.06-0.134 as a continuum with no gap anywhere in it,
-// because that number is inflated by the text's own antialiasing rather than by
-// anything behind the text. It was measuring text density and being read as
-// artwork detection.
-//
-// NONE OF THAT DECIDES A BACKGROUND ANY MORE. There used to be a rule here --
-// inside a drawn bubble, paint a rectangle; anywhere else paint nothing and let
-// a heavy halo carry the text -- and the rule was right for as long as a
-// rectangle was the only fill shape available. The clean plate erases the
-// glyph strokes themselves, so every region now sits on repaired background
-// whether or not anyone drew a bubble around it, and the split is gone.
-//
-// What survives is the part that was never about covering anything: WHAT
-// COLOUR THE TEXT SHOULD BE. That is still measured from the original pixels,
-// through surface.js's block-averaged sampler, which is what makes it correct
-// on screentone rather than fooled by it.
+// Nothing measured here decides whether to paint a background: the clean plate
+// erases the glyph strokes, so every region sits on repaired artwork. What is
+// measured is the text colour, block-averaged so screentone does not fool it.
 const DARK_BG = 0.5;        // bg luminance below which text flips to light ink
 
 /**
  * Decode the page once, for everything in this worker that needs pixels.
- *
- * Both consumers -- the colour measurement and the clean plate -- want the same
- * full-page ImageData, and decoding a two-megabyte JPEG twice per page is the
- * kind of cost that never shows up in a profile because it is spread across two
- * functions that each look cheap.
  *
  * @returns {Promise<{ctx:OffscreenCanvasRenderingContext2D,width:number,height:number}|null>}
  *   null when the bytes cannot be decoded at all.
@@ -282,10 +235,9 @@ async function decodePage(buffer) {
   } catch {
     return null;
   }
-  // Dimensions read BEFORE close(). Closing an ImageBitmap sets its width and
-  // height to zero, so returning them from the closed object hands every caller
-  // a zero-sized page -- and the failure is a silent one: no region matches, no
-  // error is thrown, the overlay simply comes back empty.
+  // Read before close(), which zeroes an ImageBitmap's width and height. A
+  // zero-sized page matches no region and throws nothing: the overlay just
+  // comes back empty.
   const { width, height } = bmp;
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -297,14 +249,12 @@ async function decodePage(buffer) {
 /**
  * Attach ink colour, background luminance and a layout box to every region.
  *
- * Run on every page including cache hits, not stored as a property of the
- * translation: these are rendering decisions measured from bytes we already
- * hold, so tuning a threshold should take effect immediately rather than
- * needing the cache thrown away.
+ * Runs on cache hits too, and is never stored with the translation: these are
+ * rendering decisions re-measured from the bytes, so tuning a threshold takes
+ * effect without discarding the cache.
  */
 function annotateBackgrounds(surface, page) {
-  // Fall back to the old assumption -- a white bubble with dark text -- only if
-  // the pixels are genuinely unavailable.
+  // A white bubble with dark text, for when the pixels are unavailable.
   const UNKNOWN = {
     fill: [255, 255, 255], bgLum: 1, bgStd: 0, bgShare: 1, bgPeak: 1,
     darkBg: false
@@ -317,8 +267,7 @@ function annotateBackgrounds(surface, page) {
 
   const { ctx, width: pageW, height: pageH } = surface;
 
-  // Pixel boxes for every region first: shaping one needs to know where the
-  // others are.
+  // Every pixel box first: shaping one needs to know where the others are.
   const boxes = page.regions.map((r) => {
     const xs = r.polygon.map((p) => p[0]);
     const ys = r.polygon.map((p) => p[1]);
@@ -344,16 +293,15 @@ function annotateBackgrounds(surface, page) {
     const measured = measureBackground(ctx.getImageData(box.x0, box.y0, w, h).data);
     Object.assign(r, measured ?? UNKNOWN);
 
-    // Snapped before it is read for luminance: a bubble that measures 252 is
-    // white, and treating it as almost-white puts the ink/halo decision on the
-    // wrong side of a threshold for regions that are plainly one thing or the
-    // other. Nothing paints this colour any more -- it exists to be measured.
+    // Snapped before it is read for luminance: a bubble measuring 252 is white,
+    // and almost-white puts the ink decision on the wrong side of DARK_BG.
+    // Nothing paints this colour -- it exists to be measured.
     r.fill = snapFill(r.fill);
     r.darkBg = (r.fill[0] * 0.299 + r.fill[1] * 0.587 + r.fill[2] * 0.114) / 255
                < DARK_BG;
 
-    // Vertical Japanese leaves a box English cannot be set in. Widen it as far
-    // as the pixels allow -- see lib/layout.js.
+    // Vertical Japanese leaves a box English cannot be set in; widen it as far
+    // as the pixels allow.
     const shaped = shapeBox(box, {
       vertical: r.vertical,
       base: r,
@@ -369,30 +317,16 @@ function annotateBackgrounds(surface, page) {
       h: (shaped.y1 - shaped.y0) / pageH
     };
     r.widenedBy = +((shaped.x1 - shaped.x0) / w).toFixed(2);
-
-    // The per-side `rim` fractions went with the fill. They existed to say how
-    // far a rectangle's soft edge could fade before it started fading over
-    // Japanese, which is not a question anyone asks about a background that no
-    // longer has any Japanese in it.
   });
 
   return page;
 }
 
-// Onomatopoeia is SHORT, and that is the second half of the test.
-//
-// Structure alone says "there is drawing behind this text", which is true of
-// hand-drawn SFX and also true of a narration block set across a textured
-// panel -- and those two want opposite treatment. Sparing a narration block
-// leaves a paragraph of Japanese on the page with a line of English shrunk into
-// a strip beside it, which is much worse than the ghosting that erasing it
-// would have caused.
-//
-// The length of the SOURCE separates them, and it is the same claim the old
-// rendering path made when it said SFX "is short, it sits on artwork by
-// nature". Measured on the Japanese rather than the English because the English
-// varies with how verbose a translation happens to be, and this is a question
-// about what was drawn.
+// Length is what separates onomatopoeia from narration set across a textured
+// panel; structure alone (below) sees drawing behind both, and sparing a
+// narration block leaves a paragraph of Japanese on the page with the English
+// shrunk into a strip beside it. Measured on the source, since the English
+// varies with how verbose a translation happens to be.
 const SFX_MAX_CHARS = 12;
 
 /** Short enough, and stylised enough, to be treated as part of the drawing. */
@@ -405,23 +339,15 @@ function isStylised(region) {
 /**
  * Attach the clean plate: the page with the glyph strokes repainted.
  *
- * Runs on BOTH paths, cache hit and miss, and is the only place a plate is
- * built. It lives here rather than in the offscreen document -- which is where
- * the mask comes from and would be the obvious home -- because what may be
- * erased depends on `kind`, and `kind` arrives with the translation.
+ * The only place a plate is built, on both the cache hit and miss paths. It
+ * lives here rather than beside the mask in the offscreen document because what
+ * may be erased depends on `kind`, which arrives with the translation.
  *
- * WHAT IS CACHED IS THE MASK, NOT THE PLATE. A plate is a full-page PNG, a few
- * hundred KB to a megabyte; the mask is one bit per pixel and mostly empty, so
- * PNG takes it down to a few tens of KB, and 500 cached pages is the difference
- * between tens of megabytes of IndexedDB and hundreds. Re-running diffusion
- * costs a few hundred ms against a cached page that already costs nothing, and
- * it keeps the same shape as annotateBackgrounds: re-derive from the bytes we
- * hold rather than trust a stored rendering. It also means a change to the rule
- * below takes effect on already-cached pages.
- *
- * A page cached before masks existed has none. Nothing is erased, every region
- * is marked unerased, and it renders the way it did before this change --
- * worse, not broken.
+ * The cache holds the mask, not the plate: a plate is a full-page PNG, while the
+ * mask is one mostly-empty bit per pixel, which is tens rather than hundreds of
+ * megabytes across a full cache. Re-running diffusion costs a few hundred ms and
+ * lets the rule below be re-tuned against already-cached pages. A page cached
+ * before masks existed has none, and simply erases nothing.
  */
 async function attachCleanPlate(surface, page) {
   const giveUp = () => {
@@ -439,9 +365,8 @@ async function attachCleanPlate(surface, page) {
   }
 
   const { width, height } = surface;
-  // A mask from a differently-sized decode cannot be trusted to line up, and a
-  // misaligned mask erases the wrong pixels -- which looks like a plausible
-  // rendering artefact rather than like a bug.
+  // A mask from a differently-sized decode erases the wrong pixels, which reads
+  // as a plausible rendering artefact rather than as a bug.
   if (bmp.width !== width || bmp.height !== height) {
     bmp.close?.();
     return giveUp();
@@ -458,33 +383,22 @@ async function attachCleanPlate(surface, page) {
 
   const raster = { width, height, data: surface.ctx.getImageData(0, 0, width, height).data };
 
-  // WHAT MAY BE ERASED, decided per region, and it is not a question about
-  // bubbles or about kind.
+  // What may be erased, decided per region.
   //
-  // Diffusion fills a masked pixel from its unmasked neighbours, so it tells
-  // the truth exactly when those neighbours are flat: a bubble interior, a
-  // tone, a gradient. Hand-drawn onomatopoeia is the opposite case -- strokes
-  // that ARE the drawing, crossing a face or a hand or a black speed-line
-  // burst. There is no "behind" to recover, so the fill is a smear, and unlike
-  // dialogue the English does not cover the damage: "GRRRR..." is a fraction of
-  // the size of the ガリガリ it replaced. The result is a panel with its
-  // artwork rubbed out and a small caption floating over the hole.
+  // Diffusion fills a masked pixel from its unmasked neighbours, so it tells the
+  // truth only where those neighbours are flat -- a bubble interior, a tone, a
+  // gradient. Hand-drawn onomatopoeia is the opposite: strokes that ARE the
+  // drawing, with no "behind" to recover, and the English that replaces them is
+  // far too small to cover the smear.
   //
-  // The obvious test was `kind === "sfx"`, and it does not work: `kind` comes
-  // from the model, mergeRegions defaults it to "bubble" for every region the
-  // model did not answer for, and in practice whole pages of SFX come back
-  // labelled "bubble". It survives inside isStylised, because when the model
-  // does say sfx it is worth believing, but it cannot be the primary signal.
+  // A region is spared only if it is both short enough to be onomatopoeia and
+  // has real structure behind it. Either test alone over-fires. `kind === "sfx"`
+  // cannot be the primary signal: mergeRegions defaults kind to "bubble" for
+  // every region the model did not answer for, and whole pages of SFX arrive
+  // labelled that way.
   //
-  // So a region is spared only if BOTH hold: it is short enough to be
-  // onomatopoeia (isStylised) and there is genuinely drawing behind it
-  // (backgroundStructure, in lib/inpaint.js). Either alone over-fires --
-  // structure alone spares narration set on a textured panel, length alone
-  // spares every one-word bubble on the page.
-  //
-  // The exclusions are punched out of the mask here rather than left out of it
-  // in the offscreen document, so this rule can be re-tuned without re-running
-  // detection, and takes effect on already-cached pages.
+  // Punched out of the mask here rather than left out of it during detection, so
+  // the rule can be re-tuned without re-running detection.
   page.regions.forEach((r) => {
     const b = r.box ?? boundsOf(r.polygon);
     const box = {
@@ -516,15 +430,10 @@ function boundsOf(polygon) {
 
 // --- the spend ceiling -----------------------------------------------------
 //
-// See lib/budget.js. Lives here because this worker is the only thing that
-// knows whether a page actually cost anything: the content script cannot tell a
-// cache hit from a paid call, and counting pages rather than calls would stop a
-// re-read of an already-translated chapter for no reason.
-//
-// Held in storage.session, so it survives this worker being killed on idle --
-// which happens constantly -- and clears when the browser closes. A ceiling
-// that resets every few minutes because the worker was recycled is not a
-// ceiling.
+// Lives here because this worker is the only thing that can tell a cache hit
+// from a paid call. Held in storage.session so it survives the worker being
+// killed on idle -- a ceiling that resets every few minutes is not a ceiling --
+// and clears when the browser closes.
 
 export class BudgetExceededError extends Error {}
 
@@ -570,8 +479,8 @@ async function translate(ctx) {
   const { buffer, mimeType, strategy, tried } = await getImageBytes(ctx);
   const fetchedAt = performance.now();
 
-  // Hashed from the ORIGINAL bytes, never the numbered render -- the render
-  // depends on detection, so keying on it would defeat the point of the cache.
+  // Hashed from the original bytes, never the numbered render, which depends on
+  // detection and would make the key vary with it.
   const hash = await contentHash(buffer);
   const seriesId = deriveSeriesId(ctx.pageUrl, { title: ctx.pageTitle });
   const key = cacheKey({
@@ -580,8 +489,7 @@ async function translate(ctx) {
 
   const cached = await cacheGet(key);
   if (cached) {
-    // Re-measured and re-inpainted rather than trusted from the cache -- see
-    // annotateBackgrounds and attachCleanPlate.
+    // Re-measured and re-inpainted rather than trusted from the cache.
     const surface = await decodePage(buffer);
     annotateBackgrounds(surface, cached);
     await attachCleanPlate(surface, cached);
@@ -599,15 +507,12 @@ async function translate(ctx) {
   const preparedAt = performance.now();
 
   if (prepared.regions.length === 0) {
-    // Not an error. A page with no text is a legitimate outcome, and the overlay
-    // needs to be able to say "nothing here" rather than hang.
+    // A page with no text is a legitimate outcome, not an error.
     //
-    // DELIBERATELY NOT CACHED. An empty result is far more often a degraded
-    // retrieval than a genuinely blank page -- a screenshot fallback that
-    // captured a partly-scrolled or tiny region hashes consistently, so caching
-    // it pins that page to zero regions permanently and no amount of retrying
-    // recovers it. Re-running detection costs ~230ms; getting this wrong costs
-    // the page.
+    // Deliberately not cached: an empty result is far more often a degraded
+    // retrieval than a blank page, and a partly-scrolled screenshot hashes
+    // consistently, so caching it would pin that page to zero regions
+    // permanently. Re-running detection costs ~230ms.
     const empty = {
       contentHash: hash,
       naturalWidth: prepared.naturalWidth,
@@ -621,9 +526,9 @@ async function translate(ctx) {
     };
   }
 
-  // THE ONLY LINE THAT SPENDS MONEY IS BELOW THIS ONE. Everything up to here --
-  // retrieval, hashing, the cache lookup, detection -- is free, so the ceiling
-  // is checked as late as possible and a cached page never touches it.
+  // Everything above is free -- retrieval, hashing, the cache lookup, detection
+  // -- so the ceiling is checked as late as possible and a cached page never
+  // touches it.
   if (ctx.auto) {
     await ensureBudget();
     if (!budget.reserve()) {
@@ -647,8 +552,8 @@ async function translate(ctx) {
       reasoningEffort: settings.reasoningEffort
     });
   } catch (err) {
-    // A call that never produced anything should not be charged against the
-    // ceiling -- otherwise a flaky network quietly eats the session's budget.
+    // A call that produced nothing must not be charged, or a flaky network
+    // quietly eats the session's budget.
     if (ctx.auto) { budget.release(); persistBudget(); }
     throw err;
   }
@@ -660,8 +565,7 @@ async function translate(ctx) {
     // Geometry and reading order come from local detection; only the language
     // fields come from the model.
     regions: mergeRegions(prepared.regions, translated.regions),
-    // The mask that erased the Japanese, kept so a cache hit can rebuild the
-    // plate without re-running detection.
+    // Kept so a cache hit can rebuild the plate without re-running detection.
     mask: prepared.mask,
     glossaryVersion: 0
   };
@@ -669,17 +573,13 @@ async function translate(ctx) {
   const surface = await decodePage(buffer);
   annotateBackgrounds(surface, page);
 
-  // Fire and forget. Caching is a side effect of translating, not part of
-  // delivering the result, and awaiting it once made a cache bug indistinguish-
-  // able from the whole pipeline hanging.
+  // Fire and forget: caching is a side effect of translating, not part of
+  // delivering the result.
   //
-  // A SNAPSHOT, not the live object. The plate is deliberately not cached -- a
-  // full-page PNG in every entry costs hundreds of megabytes across a 500-entry
-  // cache, and it is recoverable from the mask in a few hundred ms -- but
-  // "attach it after the write" does not achieve that: cacheSet awaits openDb()
-  // before it puts anything, so the structured clone happens a tick later and
-  // would pick up whatever the object holds by then. Copying here pins what
-  // gets stored to what exists now.
+  // A snapshot, not the live object. Attaching the plate after this line is not
+  // enough to keep it out of the cache -- cacheSet awaits openDb() before it
+  // writes, so the structured clone happens a tick later and would pick up
+  // whatever the object holds by then.
   void cacheSet(key, { ...page }).catch(() => {});
   await attachCleanPlate(surface, page);
 
@@ -713,8 +613,8 @@ chrome.action.onClicked.addListener(async (tab) => {
   });
 });
 
-// Without this, changing the ceiling in options does nothing until the worker
-// happens to be recycled -- which looks like the setting being ignored.
+// Without this, a new ceiling set in options does nothing until the worker
+// happens to be recycled.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.autoLimit) {
     budget.setLimit(changes.autoLimit.newValue ?? DEFAULT_LIMIT);
@@ -735,9 +635,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     .catch((err) => sendResponse({
       ok: false,
       error: String(err?.message ?? err),
-      // Flagged rather than pattern-matched on the message: the content script
-      // has to stop asking entirely when the ceiling is reached, and inferring
-      // that from error text would break the moment the wording changed.
+      // Flagged rather than pattern-matched: the content script must stop asking
+      // entirely at the ceiling, and error text is not a stable signal.
       budgetExceeded: err instanceof BudgetExceededError
     }));
 

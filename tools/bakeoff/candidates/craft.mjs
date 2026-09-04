@@ -6,16 +6,14 @@
 //                                   channel 1 = affinity score
 //   out  relu_18  intermediate features, unused
 //
-// Note the output is HALF resolution and channels-LAST, which is the opposite
-// layout to the input. Both are easy to get wrong and both fail quietly, as
-// boxes that are half-size or transposed rather than as an error.
+// The output is half resolution and channels-last, the opposite layout to the
+// input. Both fail quietly, as boxes that are half-size or transposed rather
+// than as an error.
 //
-// Why CRAFT is in the bake-off despite being the heavier model: it scores
-// CHARACTERS and then their affinity to neighbours, instead of assuming text
-// runs in horizontal lines. Japanese manga is mostly vertical, and a line-based
-// detector has to be talked out of merging adjacent columns. CRAFT's affinity
-// map is in principle the right tool. Whether that survives screentone and
-// stylised lettering is what the bake-off measures.
+// Here despite being the heavier model because it scores characters and their
+// affinity to neighbours rather than assuming horizontal lines, which is in
+// principle the right tool for vertical Japanese. Whether that survives
+// screentone and stylised lettering is what the bake-off measures.
 
 import { resizeRGBA, toTensor, padTo } from "../lib/image.mjs";
 import { connectedComponents } from "../lib/components.mjs";
@@ -62,9 +60,8 @@ export function craftCandidate({
       const [, mapH, mapW] = out.dims;   // N, H/2, W/2, 2
       const data = out.data;
 
-      // Grow from confident text pixels, but let the affinity map bridge the
-      // gaps between characters -- that union is what makes a column of kana
-      // one region instead of eight.
+      // The affinity map bridges the gaps between characters, which is what
+      // makes a column of kana one region instead of eight.
       const mask = new Uint8Array(mapW * mapH);
       const region = new Float32Array(mapW * mapH);
       for (let p = 0; p < mask.length; p++) {
@@ -76,8 +73,7 @@ export function craftCandidate({
 
       const { labels, boxes } = connectedComponents(mask, mapW, mapH, { eightWay: true });
 
-      // Peak region score per component, in one pass over the labels rather
-      // than one pass per box.
+      // Peak region score per component, in one pass over the labels.
       const peak = new Float32Array(boxes.length);
       for (let p = 0; p < labels.length; p++) {
         const id = labels[p];

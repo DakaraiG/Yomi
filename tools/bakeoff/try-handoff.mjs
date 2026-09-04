@@ -1,19 +1,17 @@
-// Phase 3 end-to-end: numbered render -> provider -> transcription + translation.
+// End to end: numbered render -> provider -> transcription + translation.
 //
-// This is the experiment that decides whether the rewrite's central bet pays
-// off. v0.4 removed manga-ocr on the strength of one observation -- that the
-// translation model transcribes the Japanese itself, unprompted. This script
-// checks that it does so RELIABLY, KEYED TO THE RIGHT BOX, on a real page.
+// There is no local OCR, so the pipeline rests on the translation model
+// transcribing the Japanese itself. This checks that it does so reliably and
+// keyed to the right box, on a real page.
 //
 //   node try-handoff.mjs --page ynko.jpg
 //   node try-handoff.mjs --page ynko.jpg --dry     print the request, call nothing
 //
-// COSTS MONEY AND LEAVES THE MACHINE. It uploads a page image to the provider
+// Costs money and leaves the machine: it uploads a page image to the provider
 // and bills the account behind the key. --dry does everything except the call.
 //
-// The key comes from YOMI_API_KEY, or from the .NET user-secrets store the v0.3
-// backend used (~/.microsoft/usersecrets/yomi-api/secrets.json). It is never
-// printed, and never written to fixtures/out.
+// The key comes from YOMI_API_KEY or from ~/.microsoft/usersecrets/yomi-api/
+// secrets.json. It is never printed, and never written to fixtures/out.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";

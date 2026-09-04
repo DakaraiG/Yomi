@@ -1,19 +1,17 @@
 // Capture the comic-text-detector baseline.
 //
-// ⚠️ REQUIRES THE v0.3 SIDECAR, which no longer exists in this tree. Every
-// recall number is measured against comic-text-detector's boxes, and the
-// captured result is committed as fixtures/baseline.json -- that file is the
-// artefact, not this script.
+// The committed artefact is fixtures/baseline.json, not this script: it holds
+// the boxes every recall number is measured against.
 //
-// To regenerate (adding fixture pages, or re-measuring):
+// Regenerating it requires the v0.3 Python sidecar, which is no longer in this
+// tree:
 //   git checkout v0.3-server-architecture
-//   1. terminal 1:  cd sidecar && ./run.sh
-//   2. terminal 2:  cd tools/bakeoff && node baseline.mjs
+//   terminal 1:  cd sidecar && ./run.sh
+//   terminal 2:  cd tools/bakeoff && node baseline.mjs
 //
-// Writes fixtures/baseline.json (pixel-space boxes, per page) plus a numbered
-// render per page so the baseline itself can be eyeballed -- it is the
-// yardstick, so it is worth confirming it is straight before measuring against
-// it.
+// Writes pixel-space boxes per page, plus a numbered render per page so the
+// yardstick itself can be confirmed straight before anything is measured
+// against it.
 
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";

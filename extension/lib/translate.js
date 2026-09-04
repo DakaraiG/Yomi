@@ -1,14 +1,9 @@
 // The provider call.
 //
-// Ported from backend/Yomi.Api/Translation/OpenAiTranslationClient.cs. Carried
-// over from v0.3 and not up for relitigation:
-//
-//   - Responses API, not Chat Completions. Luna is a reasoning model and
-//     reasoning models are better supported there. The structured-output shape
-//     differs between the two -- Responses uses text.format, Chat Completions
-//     uses response_format. Do not mix them up.
+//   - Responses API, not Chat Completions: the model is a reasoning model, and
+//     the structured-output shape differs between the two (Responses uses
+//     text.format, Chat Completions response_format).
 //   - The key goes in a header, never in the body, and is never logged.
-//   - Thinking budget via reasoning.effort, currently "low".
 
 import { SYSTEM, buildUserText, RESPONSE_SCHEMA } from "./prompt.js";
 
@@ -17,41 +12,32 @@ export const DEFAULTS = {
   providerBaseUrl: "https://api.openai.com",
   reasoningEffort: "low",
   maxOutputTokens: 8000,
-  // v0.3 had this as ProviderTimeoutSeconds and I dropped it in the port. A
-  // fetch with no timeout does not fail -- it waits forever, with no error and
-  // no log, and the extension simply never finishes that page. It presents as
-  // an intermittent hang somewhere else entirely.
+  // Required: a fetch with no timeout does not fail, it waits forever with no
+  // error and no log, and presents as an intermittent hang somewhere else.
   timeoutMs: 180_000
 };
 
 export class TranslationFailedError extends Error {}
 
 /**
- * What a cached page's GEOMETRY was produced by. Bump it whenever a change
- * makes a stored page mean something different from a fresh one:
+ * What a cached page's geometry was produced by. Bump whenever a change makes a
+ * stored page mean something different from a fresh one:
  *
  *   1  PaddleOCR line boxes, no erase mask
  *   2  comic-text-detector, fused heads, mask restricted to region boxes
  *
- * A cached page carries a mask, and a mask is an instruction to repaint
- * specific pixels. When the rule that built it changes -- confining it to
- * regions, rescaling its dilation -- every already-cached page goes on
- * replaying the OLD instruction forever, because nothing about it looks stale.
- * That is not a hypothetical: it cost an evening of chasing SFX damage on pages
- * whose masks predated the fix, while the fix worked perfectly on new ones.
+ * A cached mask is an instruction to repaint specific pixels, and nothing about
+ * a stale one looks stale: when the rule that built it changes, every cached
+ * page goes on replaying the old instruction while new pages come out fixed.
  */
 export const PIPELINE_VERSION = 2;
 
 /**
  * Cache key for a page.
  *
- * THE MODEL ID IS PART OF THE KEY, and this is not incidental. Without it,
- * evaluating two models on the same page returns the first one's result twice
- * and the comparison silently measures nothing. The prompt version is in there
- * for the same reason: editing the prompt and re-running would otherwise
- * compare new prompt against cached old. PIPELINE_VERSION is the same argument
- * for everything the offscreen document produces -- boxes, reading order, and
- * the erase mask.
+ * Model id, prompt version and pipeline version are all in the key so that
+ * changing any of them re-runs the page. Without that, evaluating two models
+ * returns the first one's result twice and the comparison measures nothing.
  */
 export function cacheKey({
   contentHash, seriesId, targetLang, model,
@@ -78,8 +64,8 @@ function parse(raw) {
     if (item.type !== "message") continue;
     for (const part of item.content ?? []) {
       if (part.type === "output_text") text = part.text;
-      // Structured Outputs can return a refusal instead of JSON. Treat it as a
-      // first-class failure, not a parse error.
+      // Structured Outputs can return a refusal instead of JSON, which is a
+      // failure in its own right rather than a parse error.
       if (part.type === "refusal") {
         throw new TranslationFailedError(`Model refused: ${part.refusal}`);
       }
@@ -150,9 +136,8 @@ export async function translatePage({
     max_output_tokens: opt.maxOutputTokens
   };
 
-  // Caller's signal if given, plus our own deadline. AbortSignal.any means a
-  // caller cancelling still works, and the deadline still applies if they never
-  // cancel.
+  // Caller's signal if given, plus the deadline, so cancelling works and the
+  // deadline still applies when the caller never cancels.
   const deadline = AbortSignal.timeout(opt.timeoutMs);
   const abort = signal ? AbortSignal.any([signal, deadline]) : deadline;
 
@@ -177,8 +162,7 @@ export async function translatePage({
 
   const body = await response.text();
   if (!response.ok) {
-    // Deliberately logs the status and the body but never the request, so key
-    // material cannot reach a log by accident.
+    // The status and body, never the request: key material must not reach a log.
     throw new TranslationFailedError(
       `Provider returned ${response.status}. ${truncate(body)}`);
   }
@@ -190,9 +174,8 @@ export async function translatePage({
  * Merge model output onto local geometry.
  *
  * Geometry and reading order come from detection, never the model. A region the
- * model drops still renders, showing the box index in place of text -- a visible
- * failure, per v0.6. Note what v0.3 could do and this cannot: fall back to the
- * OCR'd Japanese, because there is no longer any local OCR to fall back to.
+ * model drops still renders, empty, so the gap is visible; there is no local OCR
+ * to fall back to.
  */
 export function mergeRegions(regions, translated) {
   const byId = new Map(translated.map((t) => [String(t.id), t]));

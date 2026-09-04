@@ -1,16 +1,13 @@
-// Phase 2 verification: the JS panel/ordering port against the Python original.
+// The JS panel/ordering port against the Python original it replaced.
 //
-// Two kinds of test, and the second is the one that matters.
-//
-//   1. The synthetic cases ported from sidecar/tests/test_pipeline.py, asserting
-//      the same orders on the same fixtures.
+//   1. Synthetic cases ported from the Python test suite, asserting the same
+//      orders on the same fixtures.
 //   2. Real-page parity: for every fixture page, the port must reproduce
 //      comic-text-detector's reading order exactly, from shuffled input.
 //
-// (2) is the brief's "identical reading order to the Python version". It works
-// because fixtures/baseline.json stores regions in the sidecar's own order --
-// r0, r1, r2... are already ranked -- so recovering [0..n-1] from a shuffle IS
-// agreement with Python, on real manga rather than on drawn rectangles.
+// (2) is the one that matters. fixtures/baseline.json stores regions already
+// ranked in the original's order, so recovering [0..n-1] from a shuffle is
+// agreement with Python on real manga rather than on drawn rectangles.
 //
 //   node --test tests/
 
@@ -277,7 +274,7 @@ const baseline = JSON.parse(
 
 test("real pages reproduce the Python reading order", async (t) => {
   if (!baseline) {
-    t.skip("no fixtures/baseline.json — run `node baseline.mjs` with the sidecar up");
+    t.skip("no fixtures/baseline.json — see baseline.mjs");
     return;
   }
 
@@ -285,9 +282,8 @@ test("real pages reproduce the Python reading order", async (t) => {
     await t.test(name, async () => {
       const img = await loadRaster(join(FIXTURES, "pages", name));
 
-      // baseline.boxes is already in the sidecar's reading order, so feeding it
-      // in shuffled and getting the identity permutation back is exactly
-      // "agrees with Python".
+      // The baseline's boxes are already in reading order, so recovering the
+      // identity permutation from a shuffle is agreement with the original.
       const perm = shuffled(page.boxes.length);
       const boxes = perm.map((i) => {
         const b = page.boxes[i];

@@ -1,11 +1,8 @@
 // Pixel helpers for detector preprocessing.
 //
-// Hand-rolled rather than done with ctx.drawImage scaling, because detector
-// preprocessing has to match what the model was trained on and drawImage's
-// resampling is implementation-defined -- it can and does differ between
-// Chrome versions and between Chrome and Node. The bake-off's numbers were
-// measured with these exact functions, so the extension uses them too rather
-// than something that merely looks equivalent.
+// Hand-rolled rather than done with drawImage scaling, whose resampling is
+// implementation-defined and differs between Chrome versions and between Chrome
+// and Node. The bake-off's numbers were measured with these exact functions.
 
 /**
  * Bilinear resize of an RGBA raster.

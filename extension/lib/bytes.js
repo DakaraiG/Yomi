@@ -1,9 +1,6 @@
-// Base64 <-> bytes.
-//
-// Extension messages are serialised, and an ArrayBuffer does not survive the
-// trip between the service worker and an offscreen document -- it arrives as
-// an empty object, with no error, and the first thing that touches it fails
-// somewhere unrelated. Everything crossing that boundary goes as base64.
+// Base64 <-> bytes, for everything crossing between the service worker and the
+// offscreen document: messages are serialised, and an ArrayBuffer arrives as an
+// empty object with no error raised.
 
 const CHUNK = 0x8000;   // apply() on a huge array overflows the argument list
 

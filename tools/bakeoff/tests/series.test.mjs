@@ -1,11 +1,10 @@
 // seriesId derivation.
 //
-// The brief names the two tests this has to pass, because they are the two
-// failure modes v0.3 shipped with and neither is visible at runtime -- a wrong
-// key just means the glossary quietly learns the wrong things:
+// Two properties, neither visible at runtime -- a wrong key just means the
+// glossary quietly learns the wrong things:
 //
-//   same series, different chapters  -> must MATCH
-//   different series, same host      -> must NOT match
+//   same series, different chapters  -> must match
+//   different series, same host      -> must not match
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -72,8 +71,8 @@ for (const [name, urls] of siblings) {
 }
 
 test("v0.3's failure is actually fixed", () => {
-  // The exact case from the brief: everything on mangafire collapsed to
-  // "mangafire.to/read" because the first path segment is a constant.
+  // The naive rule collapses everything on mangafire to "mangafire.to/read",
+  // the first path segment being a constant there.
   const a = deriveSeriesId("https://mangafire.to/read/one-piece.dkw/en/chapter-1");
   const b = deriveSeriesId("https://mangafire.to/read/berserk.q7z/en/chapter-1");
   assert.notEqual(a, b);
